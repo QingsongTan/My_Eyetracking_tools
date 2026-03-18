@@ -1,0 +1,26 @@
+io:
+  format: auto
+  sampling_rate_hz: 120
+
+preprocess:
+  interpolation_method: linear
+  smooth_method: moving_average
+  smooth_window: 5
+  normalize_coordinates: true
+
+events:
+  velocity_threshold: 850.0
+  min_fixation_ms: 60.0
+  blink_min_duration_ms: 75.0
+
+features:
+  window_ms: 500
+  include_complexity: true
+
+model:
+  task: classification
+  model_name: random_forest
+  target: intent_label
+  test_size: 0.25
+  random_state: 42
+

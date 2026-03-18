@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gaze-toolkit"
+version = "0.1.0"
+description = "Python toolkit for eye-tracking analytics, intent modeling, and multimodal human factors prototyping."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+  {name = "Codex"},
+]
+dependencies = [
+  "matplotlib>=3.8",
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "PyYAML>=6.0",
+  "scikit-learn>=1.4",
+]
+
+[project.optional-dependencies]
+dashboard = [
+  "plotly>=5.20",
+  "streamlit>=1.33",
+]
+deep = [
+  "torch>=2.2",
+]
+explain = [
+  "lime>=0.2.0.1",
+  "shap>=0.45",
+]
+signal = [
+  "scipy>=1.12",
+]
+
+[project.scripts]
+gaze-toolkit = "gaze_toolkit.cli:main"
+gaze-toolkit-ui = "gaze_toolkit.dashboard_launcher:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+gaze_toolkit = ["py.typed"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

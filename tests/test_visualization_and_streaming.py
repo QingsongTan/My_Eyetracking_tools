@@ -19,12 +19,12 @@ def test_visualization_helpers_return_renderable_objects() -> None:
 
     figure, axis = plt.subplots()
     returned_axis = plot_scanpath(recording, ax=axis)
-    assert returned_axis.get_title() == "Scanpath"
+    assert returned_axis.get_title() == "扫描路径"
     plt.close(figure)
 
     figure, axis = plt.subplots()
     returned_axis = plot_heatmap(recording, ax=axis)
-    assert returned_axis.get_title() == "Gaze Heatmap"
+    assert returned_axis.get_title() == "注视热图"
     plt.close(figure)
 
     signal_figure = plot_signal_overview(recording)
@@ -40,7 +40,7 @@ def test_visualization_helpers_return_renderable_objects() -> None:
     )
     figure, axis = plt.subplots()
     returned_axis = plot_feature_importance(importance, ax=axis)
-    assert returned_axis.get_title() == "Top Feature Importance"
+    assert returned_axis.get_title() == "关键特征重要性"
     plt.close(figure)
 
 
@@ -58,4 +58,3 @@ def test_sliding_window_predictor_emits_prediction() -> None:
 
     assert emitted is not None
     assert emitted.prediction in {"careful", "skim"}
-

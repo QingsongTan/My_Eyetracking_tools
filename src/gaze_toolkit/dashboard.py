@@ -30,12 +30,19 @@ ACCENT = "#c8553d"
 PAPER = "#f5f1e8"
 INK = "#1f1f1f"
 GRID = "#d9cfbc"
+STYLE_OPTIONS = {"精读": "careful", "略读": "skim"}
+MODEL_OPTIONS = {
+    "随机森林": "random_forest",
+    "梯度提升树": "gradient_boosting",
+    "支持向量机": "svm",
+    "逻辑回归": "logistic_regression",
+}
 
 
 def main() -> None:
     """Render the Streamlit dashboard."""
     st.set_page_config(
-        page_title="Human Factors AI Lab",
+        page_title="眼动人因智能实验台",
         page_icon="H",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -45,21 +52,21 @@ def main() -> None:
     st.markdown(
         """
         <div class="hero">
-          <div class="hero-kicker">Portfolio Demo for Human Factors AI</div>
-          <h1>Human Factors AI Lab</h1>
+          <div class="hero-kicker">面向人因研究面试的作品集演示</div>
+          <h1>眼动与多模态人因智能实验台</h1>
           <p>
-            A research-style console for eye-tracking analytics, multimodal feature fusion,
-            intent modeling, and portfolio-grade evidence generation.
+            用可运行的研究型界面，展示眼动数据处理、多模态特征融合、状态与意图建模，
+            以及面向人因专家的工程化分析能力。
           </p>
+          <div class="hero-credit">Powered by 谭青松的求职作品集</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     assumptions = (
-        "Assumption: this MVP is optimized for local demonstration to human factors researchers and interviewers, "
-        "using CSV or synthetic gaze data plus a lightweight heart-rate modality. EDF parsing and deeper foundation "
-        "models remain extension points rather than bundled defaults."
+        "说明：这个 MVP 优先服务本地演示场景，默认使用 CSV 或模拟眼动数据，并用轻量心率信号展示多模态扩展能力。"
+        "EDF 原生解析和更重的深度基础模型当前保留为扩展点，而不是默认依赖。"
     )
     st.info(assumptions)
 
@@ -68,11 +75,11 @@ def main() -> None:
 
     tabs = st.tabs(
         [
-            "Capability Story",
-            "Single Session Analysis",
-            "Intent Modeling",
-            "Multimodal Fusion",
-            "Portfolio Talking Points",
+            "能力证明",
+            "单次会话分析",
+            "意图建模实验",
+            "多模态融合",
+            "面试讲述提纲",
         ]
     )
 
@@ -93,31 +100,31 @@ def main() -> None:
 
 
 def _build_recording_from_sidebar() -> tuple[GazeRecording, str | Path | None]:
-    st.sidebar.header("Research Session Setup")
-    source = st.sidebar.radio("Input source", options=["Synthetic demo", "Upload CSV"], index=0)
-    sampling_rate_hz = float(st.sidebar.number_input("Sampling rate (Hz)", min_value=30, max_value=1000, value=120))
+    st.sidebar.header("实验输入设置")
+    source = st.sidebar.radio("数据来源", options=["合成演示数据", "上传 CSV 文件"], index=0)
+    sampling_rate_hz = float(st.sidebar.number_input("采样率（Hz）", min_value=30, max_value=1000, value=120))
     stimulus_image: str | Path | None = None
 
-    if source == "Synthetic demo":
-        style = st.sidebar.selectbox("Reading intent pattern", options=["careful", "skim"], index=0)
-        duration_ms = int(st.sidebar.slider("Duration (ms)", min_value=2000, max_value=12000, value=5000, step=500))
-        seed = int(st.sidebar.slider("Random seed", min_value=1, max_value=999, value=42))
+    if source == "合成演示数据":
+        style_label = st.sidebar.selectbox("阅读意图模式", options=list(STYLE_OPTIONS), index=0)
+        duration_ms = int(st.sidebar.slider("时长（毫秒）", min_value=2000, max_value=12000, value=5000, step=500))
+        seed = int(st.sidebar.slider("随机种子", min_value=1, max_value=999, value=42))
         recording = simulate_gaze_recording(
             duration_ms=duration_ms,
             sampling_rate_hz=int(sampling_rate_hz),
-            style=style,
+            style=STYLE_OPTIONS[style_label],
             seed=seed,
         )
-        recording.metadata["intent_label"] = style
+        recording.metadata["intent_label"] = STYLE_OPTIONS[style_label]
         return recording, None
 
-    uploaded = st.sidebar.file_uploader("Upload gaze CSV", type=["csv"])
-    uploaded_stimulus = st.sidebar.file_uploader("Optional stimulus image", type=["png", "jpg", "jpeg"])
+    uploaded = st.sidebar.file_uploader("上传眼动 CSV", type=["csv"])
+    uploaded_stimulus = st.sidebar.file_uploader("上传刺激图片（可选）", type=["png", "jpg", "jpeg"])
     if uploaded_stimulus is not None:
         stimulus_image = uploaded_stimulus
 
     if uploaded is None:
-        st.sidebar.warning("No CSV uploaded yet. Falling back to a synthetic demo session.")
+        st.sidebar.warning("尚未上传 CSV，系统将回退到默认合成演示数据。")
         return simulate_gaze_recording(seed=42), stimulus_image
 
     frame = pd.read_csv(uploaded)
@@ -127,16 +134,16 @@ def _build_recording_from_sidebar() -> tuple[GazeRecording, str | Path | None]:
 
 
 def _run_sidebar_analysis(recording: GazeRecording) -> RecordingAnalysis:
-    st.sidebar.header("Pipeline Controls")
-    smooth_window = int(st.sidebar.slider("Smooth window", min_value=3, max_value=21, step=2, value=5))
+    st.sidebar.header("分析流程控制")
+    smooth_window = int(st.sidebar.slider("平滑窗口", min_value=3, max_value=21, step=2, value=5))
     velocity_threshold = float(
-        st.sidebar.slider("Saccade velocity threshold", min_value=200, max_value=1800, value=850, step=50)
+        st.sidebar.slider("扫视速度阈值", min_value=200, max_value=1800, value=850, step=50)
     )
-    min_fixation_ms = float(st.sidebar.slider("Min fixation (ms)", min_value=30, max_value=200, value=60, step=10))
+    min_fixation_ms = float(st.sidebar.slider("最小注视时长（ms）", min_value=30, max_value=200, value=60, step=10))
     blink_min_duration_ms = float(
-        st.sidebar.slider("Min blink duration (ms)", min_value=40, max_value=250, value=75, step=5)
+        st.sidebar.slider("最小眨眼时长（ms）", min_value=40, max_value=250, value=75, step=5)
     )
-    include_complexity = st.sidebar.toggle("Include complexity features", value=True)
+    include_complexity = st.sidebar.toggle("包含复杂度特征", value=True)
 
     return analyze_recording(
         recording,
@@ -154,55 +161,55 @@ def _render_capability_story(analysis: RecordingAnalysis) -> None:
     left, right = st.columns([1.1, 1.3], gap="large")
 
     with left:
-        st.subheader("Why this demo exists")
+        st.subheader("这个界面要证明什么")
         st.markdown(
             """
-            This interface is designed to prove a specific point in an interview:
+            这个界面是为面试场景专门设计的，重点证明：
 
-            - I can structure raw gaze data into reusable research objects.
-            - I can automate feature extraction for human factors questions.
-            - I can train intent/state models rather than stop at visualization.
-            - I can extend the same pipeline toward multimodal user signals.
-            - I can wrap the whole workflow into a tool other researchers can operate.
+            - 我能把原始眼动数据组织成可复用的研究对象。
+            - 我能自动提取人因研究常用特征，而不是只做清洗和画图。
+            - 我能构建状态/意图模型，而不是停留在可视化层。
+            - 我能把眼动链路扩展到多模态用户信号。
+            - 我能把研究流程封装成别人可直接操作的工具界面。
             """
         )
 
-        st.subheader("Current single-session evidence")
+        st.subheader("当前单次会话证据")
         metrics = analysis.quality_summary
         metric_cols = st.columns(4)
-        metric_cols[0].metric("Valid ratio", f"{metrics['valid_ratio']:.2%}")
-        metric_cols[1].metric("Fixations", int(metrics["fixation_count"]))
-        metric_cols[2].metric("Saccades", int(metrics["saccade_count"]))
-        metric_cols[3].metric("Blinks", int(metrics["blink_count"]))
+        metric_cols[0].metric("有效样本占比", f"{metrics['valid_ratio']:.2%}")
+        metric_cols[1].metric("注视次数", int(metrics["fixation_count"]))
+        metric_cols[2].metric("扫视次数", int(metrics["saccade_count"]))
+        metric_cols[3].metric("眨眼次数", int(metrics["blink_count"]))
 
     with right:
-        st.subheader("Capability matrix")
+        st.subheader("能力矩阵")
         capability_frame = pd.DataFrame(
             [
-                ["Eye tracking preprocessing", "Implemented", "Interpolation, smoothing, coordinate normalization"],
-                ["Event detection", "Implemented", "I-VT fixations, saccades, blinks"],
-                ["Feature automation", "Implemented", "Fixation, saccade, pupil, complexity metrics"],
-                ["Intent modeling", "Implemented", "Synthetic careful-vs-skim baseline"],
-                ["Multimodal fusion", "Implemented", "Eye + heart rate early-fusion baseline"],
-                ["Research UI", "Implemented", "Interactive Streamlit workbench"],
-                ["EDF / deep foundation models", "Extension point", "Kept out of the default MVP"],
+                ["眼动预处理", "已实现", "插值、平滑、坐标归一化"],
+                ["事件检测", "已实现", "I-VT 注视、扫视、眨眼"],
+                ["特征自动化", "已实现", "注视、扫视、瞳孔、复杂度特征"],
+                ["意图建模", "已实现", "精读 vs 略读基线实验"],
+                ["多模态融合", "已实现", "眼动 + 心率早期融合基线"],
+                ["研究界面", "已实现", "可交互 Streamlit 实验台"],
+                ["EDF / 深度基础模型", "扩展点", "当前没有强行打进默认 MVP"],
             ],
-            columns=["Capability", "Status", "Notes"],
+            columns=["能力项", "状态", "说明"],
         )
         st.dataframe(capability_frame, hide_index=True, use_container_width=True)
 
 
 def _render_single_session(analysis: RecordingAnalysis, stimulus_image: str | Path | None = None) -> None:
-    st.subheader("Single-session analysis chain")
-    st.caption("Input -> preprocess -> event detection -> feature extraction -> research summary")
+    st.subheader("单次会话分析链路")
+    st.caption("输入数据 -> 预处理 -> 事件检测 -> 特征提取 -> 研究摘要")
 
     metric_cols = st.columns(5)
     feature_map = analysis.features
-    metric_cols[0].metric("Duration", f"{feature_map['duration_ms'] / 1000:.1f}s")
-    metric_cols[1].metric("Path length", f"{feature_map['path_length']:.0f}")
-    metric_cols[2].metric("Mean velocity", f"{feature_map['velocity_mean']:.1f}")
-    metric_cols[3].metric("Blink rate", f"{feature_map['blink_rate_hz']:.2f} Hz")
-    metric_cols[4].metric("Pupil baseline", f"{feature_map['pupil_baseline']:.2f}")
+    metric_cols[0].metric("总时长", f"{feature_map['duration_ms'] / 1000:.1f}s")
+    metric_cols[1].metric("路径长度", f"{feature_map['path_length']:.0f}")
+    metric_cols[2].metric("平均速度", f"{feature_map['velocity_mean']:.1f}")
+    metric_cols[3].metric("眨眼频率", f"{feature_map['blink_rate_hz']:.2f} Hz")
+    metric_cols[4].metric("基线瞳孔值", f"{feature_map['pupil_baseline']:.2f}")
 
     left, right = st.columns(2, gap="large")
     with left:
@@ -218,36 +225,53 @@ def _render_single_session(analysis: RecordingAnalysis, stimulus_image: str | Pa
         plot_heatmap(analysis.enriched_recording, ax=axis)
         st.pyplot(figure, clear_figure=True, use_container_width=True)
 
-        st.markdown("**Event table**")
-        st.dataframe(analysis.event_table.head(20), use_container_width=True)
+        st.markdown("**事件表**")
+        event_table = analysis.event_table.rename(
+            columns={
+                "kind": "事件类型",
+                "start_time_ms": "开始时间(ms)",
+                "end_time_ms": "结束时间(ms)",
+                "duration_ms": "持续时间(ms)",
+                "amplitude": "幅度",
+                "peak_velocity": "峰值速度",
+                "centroid_x": "中心X",
+                "centroid_y": "中心Y",
+            }
+        )
+        event_table["事件类型"] = event_table["事件类型"].replace(
+            {"fixation": "注视", "saccade": "扫视", "blink": "眨眼"}
+        )
+        st.dataframe(event_table.head(20), use_container_width=True)
 
-    st.markdown("**Top features from this session**")
+    st.markdown("**本次会话关键特征**")
     top_features = (
         pd.Series(analysis.features, name="value")
         .sort_values(ascending=False)
         .head(18)
-        .rename_axis("feature")
+        .rename_axis("特征")
         .reset_index()
     )
+    top_features = top_features.rename(columns={"value": "数值"})
+    top_features["特征"] = top_features["特征"].map(_localize_feature_name)
     st.dataframe(top_features, hide_index=True, use_container_width=True)
 
 
 def _render_modeling_workbench() -> None:
-    st.subheader("Intent modeling workbench")
+    st.subheader("意图建模实验台")
     controls = st.columns([1, 1, 1])
-    num_sessions = int(controls[0].slider("Synthetic sessions", min_value=12, max_value=80, value=32, step=4))
-    model_name = controls[1].selectbox(
-        "Model",
-        options=["random_forest", "gradient_boosting", "svm", "logistic_regression"],
-        index=0,
-    )
-    random_state = int(controls[2].slider("Experiment seed", min_value=1, max_value=999, value=42))
+    num_sessions = int(controls[0].slider("合成会话数", min_value=12, max_value=80, value=32, step=4))
+    model_label = controls[1].selectbox("模型类型", options=list(MODEL_OPTIONS), index=0)
+    random_state = int(controls[2].slider("实验随机种子", min_value=1, max_value=999, value=42))
 
-    report = run_intent_experiment(num_sessions=num_sessions, model_name=model_name, random_state=random_state)
+    report = run_intent_experiment(
+        num_sessions=num_sessions,
+        model_name=MODEL_OPTIONS[model_label],
+        random_state=random_state,
+    )
 
     metric_cols = st.columns(3)
-    metric_cols[0].metric("Accuracy", f"{report.result.metrics.get('accuracy', 0.0):.3f}")
-    metric_cols[1].metric("F1 macro", f"{report.result.metrics.get('f1_macro', 0.0):.3f}")
+    metric_cols[0].metric("准确率", f"{report.result.metrics.get('accuracy', 0.0):.3f}")
+    metric_cols[1].metric("F1 宏平均", f"{report.result.metrics.get('f1_macro', 0.0):.3f}")
     metric_cols[2].metric("ROC AUC", f"{report.result.metrics.get('roc_auc', 0.0):.3f}")
 
     left, right = st.columns(2, gap="large")
@@ -267,73 +291,160 @@ def _render_modeling_workbench() -> None:
 
     with right:
         figure, axis = plt.subplots(figsize=(6, 4.8))
-        plot_feature_importance(report.feature_importance, ax=axis)
+        localized_importance = report.feature_importance.copy()
+        localized_importance["feature"] = localized_importance["feature"].map(_localize_feature_name)
+        plot_feature_importance(localized_importance, ax=axis)
         st.pyplot(figure, clear_figure=True, use_container_width=True)
-        st.dataframe(report.feature_importance.head(15), hide_index=True, use_container_width=True)
+        importance = localized_importance.head(15).rename(
+            columns={
+                "feature": "特征",
+                "importance_mean": "平均重要性",
+                "importance_std": "重要性标准差",
+            }
+        )
+        st.dataframe(importance, hide_index=True, use_container_width=True)
 
 
 def _render_multimodal_tab(recording: GazeRecording) -> None:
-    st.subheader("Multimodal fusion demo")
-    st.caption("Default modality pairing: eye tracking + synthetic heart-rate signal")
+    st.subheader("多模态融合演示")
+    st.caption("默认模态组合：眼动 + 模拟心率信号")
 
     heart_signal, heart_features = synthesize_heart_rate_preview(recording, seed=99)
     comparison = compare_modalities(num_sessions=32, model_name="random_forest", random_state=42)
 
     left, right = st.columns([1.1, 1], gap="large")
     with left:
-        st.markdown("**Current session heart-rate preview**")
-        st.line_chart(heart_signal.set_index("timestamp_ms"), height=260)
-        st.dataframe(
-            pd.Series(heart_features, name="value").rename_axis("feature").reset_index(),
-            hide_index=True,
-            use_container_width=True,
-        )
+        st.markdown("**当前会话心率预览**")
+        heart_signal_cn = heart_signal.rename(columns={"heart_rate_bpm": "心率（bpm）"})
+        st.line_chart(heart_signal_cn.set_index("timestamp_ms"), height=260)
+        heart_feature_frame = pd.Series(heart_features, name="数值").rename_axis("特征").reset_index()
+        heart_feature_frame["特征"] = heart_feature_frame["特征"].map(_localize_feature_name)
+        st.dataframe(heart_feature_frame, hide_index=True, use_container_width=True)
 
     with right:
-        st.markdown("**Baseline comparison**")
-        st.dataframe(comparison.summary, hide_index=True, use_container_width=True)
+        st.markdown("**基线结果对比**")
+        summary = comparison.summary.rename(
+            columns={
+                "modality": "模态方案",
+                "accuracy": "准确率",
+                "f1_macro": "F1 宏平均",
+                "roc_auc": "ROC AUC",
+                "confusion_matrix_trace": "混淆矩阵对角和",
+                "feature_count": "特征数量",
+            }
+        )
+        summary["模态方案"] = summary["模态方案"].replace(
+            {
+                "gaze_only": "仅眼动",
+                "gaze_plus_heart_rate": "眼动 + 心率",
+            }
+        )
+        st.dataframe(summary, hide_index=True, use_container_width=True)
         delta = (
             comparison.multimodal.result.metrics.get("accuracy", 0.0)
             - comparison.gaze_only.result.metrics.get("accuracy", 0.0)
         )
-        st.metric("Accuracy gain from heart-rate fusion", f"{delta:+.3f}")
+        st.metric("引入心率后的准确率变化", f"{delta:+.3f}")
 
-    st.markdown("**Interpretation**")
+    st.markdown("**如何解读这部分**")
     st.markdown(
         """
-        This tab is intentionally narrow in scope: it proves the pipeline can fuse a second physiological stream,
-        align time series, derive modality-specific features, and compare gaze-only versus multimodal modeling.
-        The physiology signal is synthetic in this MVP; replacing it with real HR, EDA, EEG, or interaction traces
-        is a data-source change rather than an architectural rewrite.
+        这一页的目标不是制造一个复杂的生理平台，而是证明当前架构已经能够接入第二路生理信号，
+        完成时间对齐、模态特征构建，以及单模态和多模态建模的对比。
+        当前心率是模拟信号，用来证明工程链路；换成真实 HR、EDA、EEG 或交互行为数据时，
+        更像是数据源替换，而不是重写架构。
         """
     )
 
 
 def _render_portfolio_talking_points() -> None:
-    st.subheader("Interview talking points")
+    st.subheader("面试讲述提纲")
     st.markdown(
         """
-        **Input**
-        This prototype accepts raw gaze streams from CSV-like exports or generates controlled synthetic sessions for reproducible demos.
+        **输入**
+        这个原型既能接收真实眼动时序，也能生成可重复的合成会话数据用于演示。
 
-        **Processing flow**
-        It standardizes coordinates, interpolates missing values, smooths samples, detects fixations/saccades/blinks, and derives reusable hand-crafted features.
+        **处理流程**
+        它会先做坐标标准化、缺失值插值、平滑滤波，再识别注视、扫视、眨眼，并自动提取建模特征。
 
-        **State changes**
-        The pipeline explicitly moves through raw recording, processed recording, enriched recording with events, feature table, and model output.
+        **状态变化**
+        整条链路显式保留原始记录、预处理记录、事件增强记录、特征表和模型输出，便于复核与解释。
 
-        **Output**
-        Researchers get scanpaths, heatmaps, signal traces, event tables, feature summaries, baseline intent metrics, and multimodal comparisons in one interface.
+        **输出**
+        研究人员可以在同一个界面里看到扫描路径、热力图、信号曲线、事件表、特征摘要、基线指标和多模态对比结果。
 
-        **Upstream / downstream impact**
-        Upstream, the only hard requirement is time-stamped gaze data. Downstream, the same objects can feed notebooks, batch experiments, online prediction, or richer deep models.
+        **上下游影响**
+        上游只要求时间戳和基本坐标；下游则可以继续接 notebook、批量实验、在线预测和更复杂的深度模型。
         """
     )
 
     st.warning(
-        "Unverified prerequisite: this demo assumes uploaded CSV files can be mapped onto timestamp/x/y/(optional pupil, valid) columns. "
-        "Vendor-specific EDF/Tobii exports still require either conversion or a custom loader."
+        "未验证前提：当前界面假设上传的 CSV 能被映射到 timestamp/x/y/（可选 pupil、valid）列。"
+        "如果是厂商专有导出格式，仍需要预转换或定制 loader。"
     )
+    st.caption("Powered by 谭青松的求职作品集")
+
+
+def _localize_feature_name(name: str) -> str:
+    direct_map = {
+        "duration_ms": "总时长(ms)",
+        "sample_count": "样本数",
+        "valid_ratio": "有效比例",
+        "path_length": "路径长度",
+        "velocity_mean": "速度均值",
+        "velocity_peak": "速度峰值",
+        "fixation_count": "注视次数",
+        "fixation_duration_mean": "注视平均时长",
+        "fixation_duration_total": "注视总时长",
+        "fixation_density": "注视密度",
+        "saccade_count": "扫视次数",
+        "saccade_amplitude_mean": "扫视幅度均值",
+        "saccade_peak_velocity_mean": "扫视峰值速度均值",
+        "saccade_latency_mean": "扫视潜伏期均值",
+        "blink_count": "眨眼次数",
+        "blink_rate_hz": "眨眼频率",
+        "blink_duration_mean": "眨眼平均时长",
+        "pupil_baseline": "瞳孔基线",
+        "pupil_change_rate": "瞳孔变化率",
+        "heart_rate_mean": "心率均值",
+        "heart_rate_std": "心率标准差",
+        "heart_rate_min": "最低心率",
+        "heart_rate_max": "最高心率",
+        "heart_rate_rmssd": "心率RMSSD",
+    }
+    if name in direct_map:
+        return direct_map[name]
+
+    replacements = {
+        "fixation": "注视",
+        "saccade": "扫视",
+        "blink": "眨眼",
+        "pupil": "瞳孔",
+        "velocity": "速度",
+        "duration": "时长",
+        "count": "次数",
+        "mean": "均值",
+        "peak": "峰值",
+        "baseline": "基线",
+        "density": "密度",
+        "latency": "潜伏期",
+        "rolling": "滑窗",
+        "std": "标准差",
+        "min": "最小值",
+        "max": "最大值",
+        "skew": "偏度",
+        "kurtosis": "峰度",
+        "approx": "近似",
+        "entropy": "熵",
+        "q25": "25分位",
+        "q75": "75分位",
+        "x": "X",
+        "y": "Y",
+    }
+    localized = name
+    for source, target in replacements.items():
+        localized = localized.replace(source, target)
+    return localized.replace("_", "·")
 
 
 def _inject_styles() -> None:
@@ -369,6 +480,12 @@ def _inject_styles() -> None:
         }}
         .hero p, .stMarkdown, .stCaption, .stDataFrame {{
           font-family: "Aptos", "Segoe UI", sans-serif;
+        }}
+        .hero-credit {{
+          margin-top: 0.9rem;
+          font-size: 0.95rem;
+          color: {ACCENT};
+          font-weight: 600;
         }}
         [data-testid="stSidebar"] {{
           background:

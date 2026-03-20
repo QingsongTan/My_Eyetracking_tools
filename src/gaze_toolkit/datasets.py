@@ -4,6 +4,7 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
 from gaze_toolkit.features import extract_features
 from gaze_toolkit.types import GazeRecording
@@ -192,3 +193,147 @@ def simulate_multimodal_intent_dataset(num_sessions: int = 24, random_state: int
         rows.append(row)
 
     return pd.DataFrame(rows)
+
+
+def create_complete_example_recording(
+    sampling_rate_hz: int = 120,
+    seed: int = 2026,
+) -> GazeRecording:
+    """Build a dashboard-ready example recording with markers, labels, and NaN blink spans."""
+    rng = np.random.default_rng(seed)
+    dt_ms = 1000.0 / sampling_rate_hz
+    current_time = 0.0
+    current_x = 280.0
+    current_y = 300.0
+    rows: list[dict[str, float | bool | int | str | None]] = []
+
+    def append_segment(
+        kind: str,
+        duration_ms: float,
+        target_x: float | None = None,
+        target_y: float | None = None,
+        pupil_baseline: float = 3.35,
+        jitter_px: float = 5.0,
+        marker: str | None = None,
+        trial: int = 0,
+    ) -> None:
+        nonlocal current_time, current_x, current_y
+
+        samples = max(1, int(round(duration_ms / dt_ms)))
+        start_x = current_x
+        start_y = current_y
+        next_x = current_x if target_x is None else float(target_x)
+        next_y = current_y if target_y is None else float(target_y)
+
+        for sample_index in range(samples):
+            row_marker = marker if sample_index == 0 and marker else None
+            if kind == "blink":
+                rows.append(
+                    {
+                        "timestamp_ms": round(current_time, 3),
+                        "x": np.nan,
+                        "y": np.nan,
+                        "pupil": np.nan,
+                        "valid": False,
+                        "marker": row_marker,
+                        "event_label": "blink",
+                        "label": "blink",
+                        "trial": trial,
+                    }
+                )
+            elif kind == "saccade":
+                alpha = (sample_index + 1) / samples
+                rows.append(
+                    {
+                        "timestamp_ms": round(current_time, 3),
+                        "x": round(start_x + alpha * (next_x - start_x), 3),
+                        "y": round(start_y + alpha * (next_y - start_y), 3),
+                        "pupil": round(pupil_baseline + rng.normal(0.0, 0.03), 3),
+                        "valid": True,
+                        "marker": row_marker,
+                        "event_label": "saccade",
+                        "label": "saccade",
+                        "trial": trial,
+                    }
+                )
+            elif kind == "smooth_pursuit":
+                alpha = (sample_index + 1) / samples
+                rows.append(
+                    {
+                        "timestamp_ms": round(current_time, 3),
+                        "x": round(start_x + alpha * (next_x - start_x) + rng.normal(0.0, 1.2), 3),
+                        "y": round(start_y + alpha * (next_y - start_y) + rng.normal(0.0, 0.8), 3),
+                        "pupil": round(pupil_baseline + rng.normal(0.0, 0.035), 3),
+                        "valid": True,
+                        "marker": row_marker,
+                        "event_label": "smooth_pursuit",
+                        "label": "smooth_pursuit",
+                        "trial": trial,
+                    }
+                )
+            else:
+                rows.append(
+                    {
+                        "timestamp_ms": round(current_time, 3),
+                        "x": round(next_x + rng.normal(0.0, jitter_px), 3),
+                        "y": round(next_y + rng.normal(0.0, jitter_px * 0.55), 3),
+                        "pupil": round(pupil_baseline + rng.normal(0.0, 0.06), 3),
+                        "valid": True,
+                        "marker": row_marker,
+                        "event_label": "fixation",
+                        "label": "fixation",
+                        "trial": trial,
+                    }
+                )
+            current_time += dt_ms
+
+        if kind != "blink":
+            current_x = next_x
+            current_y = next_y
+
+    append_segment("fixation", 800, target_x=280, target_y=300, marker="baseline_start", trial=0)
+    append_segment("fixation", 450, target_x=360, target_y=300, marker="baseline_end", trial=0)
+
+    append_segment("saccade", 36, target_x=520, target_y=320, marker="trial1_start", trial=1)
+    append_segment("fixation", 520, target_x=520, target_y=320, marker="cue_A", trial=1)
+    append_segment("blink", 110, marker="blink_1", trial=1)
+    append_segment("fixation", 640, target_x=560, target_y=336, marker="pre_response_A", trial=1)
+    append_segment("saccade", 28, target_x=760, target_y=360, trial=1)
+    append_segment("fixation", 460, target_x=760, target_y=360, marker="response_A", trial=1)
+    append_segment("smooth_pursuit", 300, target_x=880, target_y=382, marker="tracking_A", trial=1)
+    append_segment("fixation", 420, target_x=900, target_y=386, marker="trial1_end", trial=1)
+
+    append_segment("saccade", 34, target_x=480, target_y=520, marker="trial2_start", trial=2)
+    append_segment("fixation", 500, target_x=480, target_y=520, marker="cue_B", trial=2)
+    append_segment("blink", 120, marker="blink_2", trial=2)
+    append_segment("fixation", 620, target_x=540, target_y=530, marker="pre_response_B", trial=2)
+    append_segment("saccade", 24, target_x=820, target_y=548, trial=2)
+    append_segment("fixation", 480, target_x=820, target_y=548, marker="response_B", trial=2)
+    append_segment("smooth_pursuit", 280, target_x=940, target_y=560, marker="tracking_B", trial=2)
+    append_segment("fixation", 430, target_x=960, target_y=564, marker="trial2_end", trial=2)
+    append_segment("fixation", 450, target_x=980, target_y=566, marker="task_end", trial=2)
+
+    frame = pd.DataFrame(rows)
+    return GazeRecording(
+        samples=frame,
+        sampling_rate_hz=float(sampling_rate_hz),
+        metadata={
+            "intent_label": "careful",
+            "example_name": "complete_eye_tracking_example",
+            "description": "Includes markers, row-level event labels, blink NaN spans, and trial ids.",
+        },
+        source_format="synthetic_complete_example",
+    )
+
+
+def write_complete_example_csv(
+    output_path: str | Path,
+    sampling_rate_hz: int = 120,
+    seed: int = 2026,
+) -> Path:
+    """Write the complete example recording to a CSV file and return the output path."""
+    recording = create_complete_example_recording(sampling_rate_hz=sampling_rate_hz, seed=seed)
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    recording.samples.to_csv(output, index=False, encoding="utf-8")
+    return output

@@ -19,6 +19,8 @@ _COLUMN_ALIASES = {
     "y": ["y", "gaze_y", "screen_y", "y_pos", "y_position"],
     "pupil": ["pupil", "pupil_size", "pupil_diameter", "diameter"],
     "valid": ["valid", "is_valid", "tracking_valid"],
+    "marker": ["marker", "marker_name", "trigger", "message", "annotation", "stimulus_marker"],
+    "event_label": ["event_label", "event_type", "eye_event", "gaze_event", "evt", "event"],
 }
 
 
@@ -152,6 +154,6 @@ def _normalize_columns(
     if "valid" not in normalized.columns:
         normalized["valid"] = True
 
-    keep_columns = ["timestamp_ms", "x", "y", "pupil", "valid", "label", "trial"]
+    keep_columns = ["timestamp_ms", "x", "y", "pupil", "valid", "marker", "event_label", "label", "trial"]
     available = [column for column in keep_columns if column in normalized.columns]
     return normalized[available]

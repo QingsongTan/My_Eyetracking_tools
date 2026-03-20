@@ -34,6 +34,23 @@ def drop_invalid_samples(recording: GazeRecording) -> GazeRecording:
     return clone
 
 
+def handle_missing_samples(
+    recording: GazeRecording,
+    strategy: str = "interpolate",
+    interpolation_method: str = "linear",
+    columns: Iterable[str] = ("x", "y", "pupil"),
+) -> GazeRecording:
+    """Resolve NaN and invalid samples according to the chosen strategy."""
+    normalized_strategy = strategy.lower()
+    if normalized_strategy == "interpolate":
+        return interpolate_missing(recording, method=interpolation_method, columns=columns)
+    if normalized_strategy in {"drop", "clean"}:
+        return drop_invalid_samples(recording)
+    if normalized_strategy in {"keep", "none"}:
+        return recording.copy()
+    raise ValueError(f"Unsupported missing data strategy: {strategy}")
+
+
 def smooth_signal(
     recording: GazeRecording,
     method: str = "moving_average",
@@ -98,13 +115,18 @@ def normalize_coordinates(
 
 def preprocess(
     recording: GazeRecording,
+    missing_strategy: str = "interpolate",
     interpolation_method: str = "linear",
     smooth_method: str = "moving_average",
     smooth_window: int = 5,
     normalize_coordinates_flag: bool = True,
 ) -> GazeRecording:
     """Run the default preprocessing pipeline."""
-    processed = interpolate_missing(recording, method=interpolation_method)
+    processed = handle_missing_samples(
+        recording,
+        strategy=missing_strategy,
+        interpolation_method=interpolation_method,
+    )
     processed = smooth_signal(processed, method=smooth_method, window=smooth_window)
     if normalize_coordinates_flag:
         processed = normalize_coordinates(processed)

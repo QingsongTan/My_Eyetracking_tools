@@ -52,6 +52,22 @@ def test_io_from_frame_and_asc_loading(tmp_path: Path) -> None:
     assert len(loaded.samples) == 3
 
 
+def test_from_frame_accepts_nan_coordinates_and_marks_invalid() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp_ms": [0.0, 8.3, 16.6],
+            "x": [100.0, None, 120.0],
+            "y": [200.0, None, 220.0],
+            "valid": [1, 1, "0"],
+        }
+    )
+
+    recording = from_frame(frame)
+
+    assert recording.samples["valid"].tolist() == [True, False, False]
+    assert recording.samples.loc[1, "x"] != recording.samples.loc[1, "x"]
+
+
 def test_dashboard_launcher_sets_streamlit_args(monkeypatch) -> None:
     from streamlit.web import cli as stcli
 
@@ -63,4 +79,3 @@ def test_dashboard_launcher_sets_streamlit_args(monkeypatch) -> None:
 
     monkeypatch.setattr(stcli, "main", fake_main)
     assert launcher_main() == 0
-

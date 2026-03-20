@@ -5,11 +5,12 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_bool_dtype
 
 from gaze_toolkit.errors import DataValidationError
 
 REQUIRED_COLUMNS = ("timestamp_ms", "x", "y")
-OPTIONAL_COLUMNS = ("pupil", "valid", "label", "trial")
+OPTIONAL_COLUMNS = ("pupil", "valid", "marker", "event_label", "label", "trial")
 
 
 @dataclass(slots=True)
@@ -59,10 +60,11 @@ class GazeRecording:
         if normalized["timestamp_ms"].isna().any():
             raise DataValidationError("All samples must contain a valid timestamp.")
 
+        coordinate_mask = normalized[["x", "y"]].notna().all(axis=1)
         if "valid" not in normalized.columns:
-            normalized["valid"] = ~normalized[["x", "y"]].isna().any(axis=1)
+            normalized["valid"] = coordinate_mask
         else:
-            normalized["valid"] = normalized["valid"].fillna(False).astype(bool)
+            normalized["valid"] = _coerce_valid_column(normalized["valid"]) & coordinate_mask
 
         valid_subset = normalized.loc[normalized["valid"], ["x", "y"]]
         if valid_subset.isna().any().any():
@@ -72,6 +74,10 @@ class GazeRecording:
             normalized["pupil"] = np.nan
         else:
             normalized["pupil"] = pd.to_numeric(normalized["pupil"], errors="coerce")
+
+        for column in ("marker", "event_label", "label", "trial"):
+            if column not in normalized.columns:
+                normalized[column] = pd.NA
 
         self.samples = normalized
 
@@ -97,3 +103,26 @@ class GazeRecording:
         clone = self.copy()
         clone.events = events
         return clone
+
+
+def _coerce_valid_column(values: pd.Series) -> pd.Series:
+    """Normalize common validity encodings to boolean flags."""
+    if is_bool_dtype(values):
+        return values.fillna(False).astype(bool)
+
+    numeric = pd.to_numeric(values, errors="coerce")
+    normalized = pd.Series(False, index=values.index, dtype="bool")
+
+    numeric_mask = numeric.notna()
+    if numeric_mask.any():
+        normalized.loc[numeric_mask] = numeric.loc[numeric_mask].astype(float) != 0.0
+
+    text = values.astype("string").str.strip().str.lower()
+    truthy_tokens = {"true", "t", "yes", "y", "valid"}
+    falsy_tokens = {"false", "f", "no", "n", "invalid", "", "nan", "none", "null", "<na>"}
+    text_mask = ~numeric_mask & text.notna()
+    if text_mask.any():
+        normalized.loc[text_mask] = text.loc[text_mask].isin(truthy_tokens)
+        normalized.loc[text_mask & text.isin(falsy_tokens)] = False
+
+    return normalized.fillna(False).astype(bool)

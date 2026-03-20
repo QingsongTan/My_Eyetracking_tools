@@ -10,6 +10,7 @@ from gaze_toolkit.events import attach_events
 from gaze_toolkit.features import extract_features
 from gaze_toolkit.io import load
 from gaze_toolkit.preprocess import preprocess
+from gaze_toolkit.segmentation import build_segment_feature_table, segment_recording
 from gaze_toolkit.types import GazeRecording
 
 
@@ -51,6 +52,7 @@ def run_pipeline(
     preprocess_config = effective.get("preprocess", {})
     processed = preprocess(
         recording,
+        missing_strategy=preprocess_config.get("missing_strategy", "interpolate"),
         interpolation_method=preprocess_config.get("interpolation_method", "linear"),
         smooth_method=preprocess_config.get("smooth_method", "moving_average"),
         smooth_window=int(preprocess_config.get("smooth_window", 5)),
@@ -63,6 +65,8 @@ def run_pipeline(
         velocity_threshold=float(event_config.get("velocity_threshold", 850.0)),
         min_fixation_ms=float(event_config.get("min_fixation_ms", 60.0)),
         blink_min_duration_ms=float(event_config.get("blink_min_duration_ms", 75.0)),
+        source=event_config.get("source", "auto"),
+        label_column=event_config.get("label_column"),
     )
 
     feature_config = effective.get("features", {})
@@ -72,3 +76,54 @@ def run_pipeline(
         include_complexity=bool(feature_config.get("include_complexity", True)),
     )
 
+
+def run_segmented_pipeline(
+    input_path: str | Path,
+    segmentation: dict[str, Any],
+    config: str | Path | dict[str, Any] | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> pd.DataFrame:
+    """Run preprocess/events/features over one or more segments."""
+    base_config: dict[str, Any] = {}
+    if isinstance(config, (str, Path)):
+        base_config = load_config(config)
+    elif isinstance(config, dict):
+        base_config = dict(config)
+
+    effective = merge_config(base_config, overrides or {})
+    io_config = effective.get("io", {})
+    recording = load(
+        input_path,
+        format=io_config.get("format"),
+        sampling_rate_hz=io_config.get("sampling_rate_hz"),
+    )
+
+    segments = segment_recording(recording, **segmentation)
+    preprocess_config = effective.get("preprocess", {})
+    event_config = effective.get("events", {})
+    feature_config = effective.get("features", {})
+
+    return build_segment_feature_table(
+        segments,
+        preprocess_fn=preprocess,
+        attach_events_fn=attach_events,
+        extract_features_fn=extract_features,
+        preprocess_params={
+            "missing_strategy": preprocess_config.get("missing_strategy", "interpolate"),
+            "interpolation_method": preprocess_config.get("interpolation_method", "linear"),
+            "smooth_method": preprocess_config.get("smooth_method", "moving_average"),
+            "smooth_window": int(preprocess_config.get("smooth_window", 5)),
+            "normalize_coordinates_flag": bool(preprocess_config.get("normalize_coordinates", True)),
+        },
+        event_params={
+            "velocity_threshold": float(event_config.get("velocity_threshold", 850.0)),
+            "min_fixation_ms": float(event_config.get("min_fixation_ms", 60.0)),
+            "blink_min_duration_ms": float(event_config.get("blink_min_duration_ms", 75.0)),
+            "source": event_config.get("source", "auto"),
+            "label_column": event_config.get("label_column"),
+        },
+        feature_params={
+            "window_ms": float(feature_config.get("window_ms", 500.0)),
+            "include_complexity": bool(feature_config.get("include_complexity", True)),
+        },
+    )

@@ -1,0 +1,64 @@
+scenario:
+  name: "手机设置页信息架构评测"
+  product: "手机"
+  research_goal: "评估两个设置页方案在视觉搜索效率和认知负荷上的差异"
+
+research_design:
+  type: "被试内设计 (within-subject)"
+  iv: "设置页方案 (A: 当前版 vs B: 优化版)"
+  dv:
+    eye_tracking:
+      - "目标设置项首次注视到达时间 TTFF (ms)"
+      - "任务期间注视熵 Gaze Entropy"
+      - "AOI 驻留时长分布"
+      - "AOI 转移矩阵"
+    behavior:
+      - "任务完成时间 (s)"
+      - "错误点击次数"
+    subjective:
+      - "SUS 可用性量表 (0-100)"
+      - "NASA-TLX 任务负荷指数"
+  sample_size: "N=30 (G*Power: α=0.05, d=0.5, power=0.80)"
+  counterbalancing: "拉丁方设计，控制顺序效应"
+
+tasks:
+  - id: "T1"
+    description: "找到并打开 Wi-Fi 设置"
+    aoi_regions:
+      - name: "顶部搜索栏"
+        region: [0, 0, 1080, 120]
+      - name: "网络与连接分组"
+        region: [0, 120, 1080, 400]
+      - name: "显示与亮度分组"
+        region: [0, 400, 1080, 680]
+      - name: "底部导航栏"
+        region: [0, 1800, 1080, 1920]
+  - id: "T2"
+    description: "找到蓝牙开关并切换状态"
+    aoi_regions:
+      - name: "顶部搜索栏"
+        region: [0, 0, 1080, 120]
+      - name: "网络与连接分组"
+        region: [0, 120, 1080, 400]
+      - name: "其他区域"
+        region: [0, 400, 1080, 1800]
+  - id: "T3"
+    description: "调整屏幕亮度到指定值"
+    aoi_regions:
+      - name: "顶部搜索栏"
+        region: [0, 0, 1080, 120]
+      - name: "显示与亮度分组"
+        region: [0, 400, 1080, 680]
+      - name: "其他区域"
+        region: [0, 120, 1080, 400]
+
+analysis_plan:
+  primary:
+    - "配对 t-test / Wilcoxon: 方案A vs 方案B 各指标差异"
+    - "重复测量 ANOVA: 任务 × 方案 交互效应"
+    - "AOI 转移矩阵对比（信息流分析）"
+  secondary:
+    - "ML 分类模型: 眼动特征预测任务是否成功完成"
+    - "注视熵与 SUS 分数的相关分析"
+
+huawei_relevance: "直接对应华为手机 EMUI/HarmonyOS 设置页的可用性研究场景"

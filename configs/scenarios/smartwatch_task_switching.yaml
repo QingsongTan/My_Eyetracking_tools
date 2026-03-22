@@ -1,0 +1,41 @@
+scenario:
+  name: "智能手表表盘信息密度评测"
+  product: "智能手表/穿戴设备"
+  research_goal: "评估不同信息密度表盘方案在快速浏览任务下的注意力分配差异"
+
+research_design:
+  type: "被试间设计 (between-subject)"
+  iv: "表盘方案 (简洁版 vs 信息密集版)"
+  dv:
+    eye_tracking:
+      - "目标信息 TTFF (ms)"
+      - "注视点数量"
+      - "平均注视时长 (ms)"
+      - "眼跳幅度均值"
+    behavior:
+      - "信息读取准确率"
+      - "响应时间 (ms)"
+    subjective:
+      - "视觉负荷主观评分 (1-7)"
+  sample_size: "N=40 (每组 N=20)"
+  counterbalancing: "随机分组，年龄/视力匹配"
+
+tasks:
+  - id: "T1"
+    description: "快速读取当前时间与日期"
+    aoi_regions:
+      - name: "时间区域"
+        region: [60, 40, 300, 140]
+      - name: "日期区域"
+        region: [60, 150, 300, 210]
+      - name: "健康数据区"
+        region: [60, 220, 300, 320]
+
+analysis_plan:
+  primary:
+    - "独立样本 t-test / Mann-Whitney: 两方案间 TTFF 差异"
+    - "AOI 驻留比例对比: 目标区 vs 干扰区"
+  secondary:
+    - "回归分析: 信息密度 × 任务难度对 TTFF 的影响"
+
+huawei_relevance: "对应华为 Watch GT 系列表盘设计人因评测场景"

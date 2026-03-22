@@ -1,0 +1,16 @@
+{
+  "session_id": "ai-1774098682-26140",
+  "ccb_project_id": "67b9976ce03b0665e5cdc06fa67a0ed1916ac9d7f7d685358eb4e03bd686b991",
+  "runtime_dir": "C:\\Users\\17675\\AppData\\Local\\Temp\\claude-ai-17675\\ai-1774098682-26140\\gemini",
+  "terminal": "wezterm",
+  "tmux_session": null,
+  "pane_id": "2",
+  "pane_title_marker": "CCB-Gemini",
+  "work_dir": "C:\\Users\\17675\\Desktop\\AI_code\\眼动",
+  "work_dir_norm": "c:/users/17675/desktop/ai_code/眼动",
+  "start_dir": "C:\\Users\\17675\\Desktop\\AI_code\\眼动",
+  "active": false,
+  "started_at": "2026-03-21 21:11:32",
+  "start_cmd": "gemini; $code = $LASTEXITCODE; Write-Host \"`n[gemini] exited with code $code. Press Enter to close...\"; Read-Host; exit $code",
+  "ended_at": "2026-03-21 21:52:33"
+}

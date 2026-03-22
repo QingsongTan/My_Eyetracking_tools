@@ -1,0 +1,44 @@
+# Project Instructions
+
+先从原始需求出发，不默认用户已经完全想清楚目标、约束和实现路径。
+只有当需求存在关键歧义，且不同理解会导致明显不同方案或较高错误成本时，才先停下来澄清；否则基于最合理解释继续，并明确说明假设。
+当需要给出修改或重构方案时，遵循以下原则：默认只围绕用户明确提出的目标设计方案，不擅自扩展业务目标，不引入替代业务路径。
+优先给出满足目标的最小完整方案，而不是补丁式兼容方案；但如果“最短路径”与“非补丁”冲突，应优先选择不会引入结构性错误的最小正确方案。
+不做与当前需求无关的兜底、降级或额外分支设计；但为保证逻辑闭合，允许加入必要的输入约束、状态检查和边界保护。
+输出方案前，按输入、处理流程、状态变化、输出、上下游影响进行链路检查；对无法验证的部分必须明确标注假设和未验证前提，不得将推测表述为已确认事实。
+
+# cc-connect Integration
+
+This project is managed via cc-connect, a bridge to messaging platforms.
+
+## Scheduled tasks
+
+When the user asks you to do something on a schedule, use the shell tool to run:
+
+`cc-connect cron add --cron "<min> <hour> <day> <month> <weekday>" --prompt "<task description>" --desc "<short label>"`
+
+Environment variables `CC_PROJECT` and `CC_SESSION_KEY` are already set. Do not specify `--project` or `--session-key`.
+
+Examples:
+
+- `cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending repos and send a summary" --desc "Daily GitHub Trending"`
+- `cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"`
+
+To list or delete cron jobs:
+
+- `cc-connect cron list`
+- `cc-connect cron del <job-id>`
+
+## Send Message To Current Chat
+
+For short single-line messages:
+
+- `cc-connect send -m "short message"`
+
+For long or multi-line messages in PowerShell:
+
+```powershell
+@'
+your message here
+'@ | cc-connect send --stdin
+```

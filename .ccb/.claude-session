@@ -1,0 +1,19 @@
+{
+  "session_id": "ai-1774102480-31120",
+  "ccb_project_id": "67b9976ce03b0665e5cdc06fa67a0ed1916ac9d7f7d685358eb4e03bd686b991",
+  "work_dir": "C:\\Users\\17675\\Desktop\\AI_code\\眼动",
+  "work_dir_norm": "c:/users/17675/desktop/ai_code/眼动",
+  "start_dir": "C:\\Users\\17675\\Desktop\\AI_code\\眼动",
+  "terminal": "wezterm",
+  "active": true,
+  "started_at": "2026-03-21 20:36:50",
+  "updated_at": "2026-03-21 22:28:08",
+  "pane_id": "1",
+  "pane_title_marker": "CCB-Claude",
+  "ended_at": "2026-03-21 21:52:33",
+  "claude_session_path": "C:\\Users\\17675\\.claude\\projects\\c--Users-17675-Desktop-AI-code---\\3e31abf8-f424-41db-a919-ba178454a207.jsonl",
+  "claude_session_id": "3e31abf8-f424-41db-a919-ba178454a207",
+  "old_claude_session_id": "1acedf7b-02f6-475c-accd-12371dd24818",
+  "old_claude_session_path": "C:\\Users\\17675\\.claude\\projects\\C--Users-17675-Desktop-AI-code---\\3e31abf8-f424-41db-a919-ba178454a207.jsonl",
+  "old_updated_at": "2026-03-21 22:26:24"
+}

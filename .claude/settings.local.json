@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell.exe -Command \"Start-Process -NoNewWindow -FilePath 'ask' -ArgumentList 'codex' -RedirectStandardInput \\(New-TemporaryFile | ForEach-Object { '用一句话回复 bridge ok' | Set-Content \\\\$_; \\\\$_.FullName }\\)\")",
+      "Bash(ccb-ping codex:*)",
+      "Bash(powershell.exe -Command \"Get-Process -Id 48200 -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,StartTime\")",
+      "WebFetch(domain:github.com)",
+      "Bash(gh api:*)",
+      "Bash(powershell -ExecutionPolicy Bypass -Command 'Get-Help $HOME/.claude/skills/codex/scripts/ask_codex.ps1 -Detailed')",
+      "Bash(where jq:*)",
+      "WebSearch"
+    ]
+  }
+}

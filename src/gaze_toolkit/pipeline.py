@@ -11,6 +11,7 @@ from gaze_toolkit.features import extract_features
 from gaze_toolkit.io import load
 from gaze_toolkit.preprocess import preprocess
 from gaze_toolkit.segmentation import build_segment_feature_table, segment_recording
+from gaze_toolkit.tables import compute_quality_grade
 from gaze_toolkit.types import GazeRecording
 
 
@@ -21,7 +22,13 @@ def build_feature_dataset(recordings: list[GazeRecording], target_key: str = "in
         processed = preprocess(recording)
         enriched = attach_events(processed)
         row = extract_features(enriched)
-        row["session_id"] = index
+        metadata = recording.metadata
+        row["session_id"] = metadata.get("session_id", index)
+        row["subject_id"] = metadata.get("subject_id")
+        row["condition"] = metadata.get("condition")
+        row["trial"] = metadata.get("trial")
+        row["quality_grade"] = metadata.get("quality_grade", compute_quality_grade(recording))
+        row["segment_name"] = metadata.get("segment_name")
         if target_key in recording.metadata:
             row[target_key] = recording.metadata[target_key]
         rows.append(row)

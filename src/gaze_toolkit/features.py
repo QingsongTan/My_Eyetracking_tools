@@ -130,10 +130,17 @@ def _add_signal_statistics(
             features[f"{column}_approx_entropy"] = float(approximate_entropy(series.to_numpy()))
 
 
-def approximate_entropy(signal: np.ndarray, m: int = 2, r: float | None = None) -> float:
+def approximate_entropy(
+    signal: np.ndarray,
+    m: int = 2,
+    r: float | None = None,
+    max_samples: int = 2000,
+) -> float:
     """Compute approximate entropy for a one-dimensional signal."""
     values = np.asarray(signal, dtype=float)
     values = values[~np.isnan(values)]
+    if max_samples > 0 and len(values) > max_samples:
+        values = _downsample_evenly(values, target_size=max_samples)
     if len(values) <= m + 1:
         return 0.0
 
@@ -148,6 +155,17 @@ def approximate_entropy(signal: np.ndarray, m: int = 2, r: float | None = None) 
         return float(np.mean(np.log(counts)))
 
     return float(_phi(m) - _phi(m + 1))
+
+
+def _downsample_evenly(values: np.ndarray, target_size: int) -> np.ndarray:
+    """按等间隔保留样本，避免超长序列在复杂度特征上 OOM。"""
+    if target_size <= 0 or len(values) <= target_size:
+        return values
+
+    step = len(values) / float(target_size)
+    indices = np.floor(np.arange(target_size, dtype=float) * step).astype(int)
+    indices[-1] = len(values) - 1
+    return values[indices]
 
 
 def _mean(values: Any) -> float:

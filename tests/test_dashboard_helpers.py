@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+from io import BytesIO
+
 import pandas as pd
 import pytest
+from PIL import Image
 
-from gaze_toolkit.dashboard import DashboardControls, _build_segment_views, _parse_time_ranges
+from gaze_toolkit.dashboard import (
+    DashboardControls,
+    _build_segment_views,
+    _load_canvas_background_image,
+    _parse_canvas_rectangles_to_aois,
+    _parse_time_ranges,
+)
 from gaze_toolkit.datasets import simulate_gaze_recording
 
 
@@ -39,3 +48,60 @@ def test_build_segment_views_returns_segment_specific_analysis() -> None:
 
     assert len(segment_views) == 1
     assert segment_views[0].analysis.features["duration_ms"] < recording.duration_ms
+
+
+def test_load_canvas_background_image_supports_file_like_object() -> None:
+    buffer = BytesIO()
+    Image.new("RGB", (12, 8), color=(10, 20, 30)).save(buffer, format="PNG")
+    buffer.seek(0)
+
+    loaded = _load_canvas_background_image(buffer)
+
+    assert loaded is not None
+    assert loaded.size == (12, 8)
+    assert loaded.mode == "RGBA"
+
+
+def test_parse_canvas_rectangles_to_aois_scales_coordinates() -> None:
+    aois = _parse_canvas_rectangles_to_aois(
+        {
+            "objects": [
+                {
+                    "type": "rect",
+                    "left": 10.0,
+                    "top": 5.0,
+                    "width": 20.0,
+                    "height": 10.0,
+                    "scaleX": 1.5,
+                    "scaleY": 2.0,
+                }
+            ]
+        },
+        canvas_width=100,
+        canvas_height=50,
+        screen_size=(200, 100),
+    )
+
+    assert len(aois) == 1
+    assert aois[0].name == "AOI 1"
+    assert aois[0].region == pytest.approx((20.0, 10.0, 80.0, 50.0))
+
+
+def test_parse_canvas_rectangles_to_aois_ignores_invalid_objects() -> None:
+    aois = _parse_canvas_rectangles_to_aois(
+        {
+            "objects": [
+                {"type": "line", "left": 0, "top": 0, "width": 30, "height": 20},
+                {"type": "rect", "left": 2, "top": 2, "width": 4, "height": 7},
+                {"type": "rect", "left": 5, "top": 5, "width": 20, "height": 20, "angle": 15},
+                {"type": "rect", "left": 8, "top": 12, "width": 30, "height": 16},
+            ]
+        },
+        canvas_width=100,
+        canvas_height=100,
+        screen_size=(1000, 1000),
+    )
+
+    assert len(aois) == 1
+    assert aois[0].name == "AOI 1"
+    assert aois[0].region == pytest.approx((80.0, 120.0, 380.0, 280.0))

@@ -2,14 +2,27 @@ from __future__ import annotations
 
 import html
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
+import yaml
+from PIL import Image
 
+from gaze_toolkit.aoi import (
+    AOI,
+    assign_fixations_to_aoi,
+    compute_aoi_metrics,
+    compute_transition_matrix,
+    define_aoi,
+)
 from gaze_toolkit.analysis import (
     RecordingAnalysis,
     analyze_recording,
@@ -17,9 +30,16 @@ from gaze_toolkit.analysis import (
     run_intent_experiment,
     synthesize_heart_rate_preview,
 )
+from gaze_toolkit.batch import (
+    batch_analyze,
+    build_html_report_content,
+    build_markdown_report_content,
+)
 from gaze_toolkit.datasets import simulate_gaze_recording
 from gaze_toolkit.events import has_labeled_events
 from gaze_toolkit.io import from_frame
+from gaze_toolkit.pipeline import build_feature_dataset
+from gaze_toolkit.quality import QualityReport, assess_quality, find_missing_segments, format_quality_cards
 from gaze_toolkit.saliency import (
     COGNITIVE_SALIENCY_BACKEND,
     FAST_SALIENCY_BACKEND,
@@ -27,7 +47,23 @@ from gaze_toolkit.saliency import (
     probe_deepgaze_runtime,
     predict_image_attention,
 )
+from gaze_toolkit.scenarios import (
+    SCENARIOS_DIR,
+    ScenarioTask,
+    get_scenario_aois,
+    list_scenarios,
+    load_scenario,
+)
 from gaze_toolkit.segmentation import segment_recording
+from gaze_toolkit.statistics import (
+    compare_conditions,
+    descriptive_table,
+    independent_t_test,
+    mann_whitney_test,
+    paired_t_test,
+    wilcoxon_test,
+)
+from gaze_toolkit.tables import fixation_table
 from gaze_toolkit.types import GazeRecording
 from gaze_toolkit.visualization import (
     plot_confusion,
@@ -38,6 +74,14 @@ from gaze_toolkit.visualization import (
     plot_metrics,
     plot_signal_overview,
 )
+
+try:
+    from streamlit_drawable_canvas import st_canvas
+
+    _HAS_AOI_CANVAS = True
+except Exception:
+    st_canvas = None
+    _HAS_AOI_CANVAS = False
 
 ACCENT = "#00F3FF"
 PAPER = "#0A1A2F"
@@ -95,6 +139,15 @@ IMAGE_ATTENTION_MODEL_LABELS = {
     FAST_SALIENCY_BACKEND: "OpenCV Fast Saliency",
     COGNITIVE_SALIENCY_BACKEND: "PyTorch + PySaliency + DeepGaze",
 }
+AOI_STATE_KEY = "dashboard_aois"
+AOI_CANVAS_DRAFT_KEY = "dashboard_aoi_canvas"
+AOI_SCANPATH_KEY = "single-session-aoi-scanpath"
+AOI_TRANSITION_KEY = "single-session-aoi-transition"
+DASHBOARD_ACTIVE_TAB_KEY = "dashboard_active_tab"
+SCENARIO_LINKED_KEY = "dashboard_linked_scenario"
+SCENARIO_IMPORT_NOTICE_KEY = "dashboard_scenario_import_notice"
+BATCH_RESULTS_KEY = "dashboard_batch_results"
+AOI_CANVAS_WIDTH = 640
 
 
 @dataclass
@@ -181,15 +234,19 @@ def main() -> None:
         st.error(f"当前配置无法完成分析：{exc}")
         st.stop()
 
-    tabs = st.tabs(
-        [
-            "研究概览",
-            "单次会话分析",
-            "意图建模实验",
-            "多模态融合",
-            "项目解读",
-        ]
-    )
+    tab_labels = [
+        "研究概览",
+        "单次会话分析",
+        "意图建模实验",
+        "多模态融合",
+        "批量分析",
+        "项目解读",
+        "产品评测场景",
+    ]
+    default_tab = st.session_state.pop(DASHBOARD_ACTIVE_TAB_KEY, None)
+    if default_tab not in tab_labels:
+        default_tab = None
+    tabs = st.tabs(tab_labels, default=default_tab, key="dashboard-main-tabs")
 
     with tabs[0]:
         _render_capability_story(full_analysis, controls, segment_table)
@@ -213,7 +270,13 @@ def main() -> None:
         _render_multimodal_tab(recording, theme_name)
 
     with tabs[4]:
+        _render_batch_tab(theme_name=theme_name)
+
+    with tabs[5]:
         _render_portfolio_talking_points()
+
+    with tabs[6]:
+        _render_scenario_tab()
 
 
 def _render_overview_strip() -> None:
@@ -541,6 +604,93 @@ def _render_capability_story(
         _render_panel_table(coverage_frame, hide_index=True, max_height_px=360)
 
 
+def _render_quality_cards(report: QualityReport, theme_name: str) -> None:
+    del theme_name
+
+    status_labels = {
+        "good": "🟢 good",
+        "warn": "🟡 warn",
+        "bad": "🔴 bad",
+        "info": "⚪ info",
+    }
+    cards = format_quality_cards(report)
+    primary_cards = cards[:6]
+    secondary_cards = cards[6:]
+
+    st.markdown("### 数据质量速览")
+    for card_group in [primary_cards, secondary_cards]:
+        if not card_group:
+            continue
+        columns = st.columns(len(card_group), gap="small")
+        for column, card in zip(columns, card_group, strict=False):
+            with column:
+                st.metric(card["label"], card["value"])
+                st.caption(status_labels.get(card["status"], "⚪ info"))
+
+
+def _render_quality_detail(recording: GazeRecording, report: QualityReport, theme_name: str) -> None:
+    with st.expander("数据质量详情", expanded=False):
+        missing_segments = find_missing_segments(recording.samples)
+        if not missing_segments:
+            st.info("无数据缺失")
+            return
+
+        detail_frame = pd.DataFrame(missing_segments)
+        detail_frame["start_time_s"] = detail_frame["start_time_ms"] / 1000.0
+        detail_frame["end_time_s"] = detail_frame["end_time_ms"] / 1000.0
+        total_duration_ms = max(report.recording_duration_s * 1000.0, 0.0)
+        detail_frame["percentage_of_total"] = (
+            detail_frame["duration_ms"] / total_duration_ms if total_duration_ms > 0.0 else 0.0
+        )
+
+        timeline_frame = detail_frame.sort_values("start_time_ms").reset_index(drop=True)
+        figure = go.Figure(
+            data=[
+                go.Bar(
+                    x=timeline_frame["duration_ms"] / 1000.0,
+                    y=["缺失段"] * len(timeline_frame),
+                    base=timeline_frame["start_time_s"],
+                    orientation="h",
+                    marker={"color": "#FF7A59"},
+                    hovertemplate=(
+                        "开始=%{base:.3f} s<br>"
+                        "持续=%{x:.3f} s<br>"
+                        "结束=%{customdata[0]:.3f} s<br>"
+                        "样本数=%{customdata[1]}<extra></extra>"
+                    ),
+                    customdata=timeline_frame[["end_time_s", "sample_count"]].to_numpy(),
+                    name="缺失段",
+                )
+            ]
+        )
+        figure.update_layout(
+            title="缺失段时间轴分布",
+            template="plotly_white" if theme_name == "light" else "plotly_dark",
+            height=240,
+            margin={"l": 20, "r": 20, "t": 44, "b": 24},
+            showlegend=False,
+            xaxis={"title": "时间 (s)"},
+            yaxis={"title": "", "showticklabels": False},
+        )
+        st.plotly_chart(
+            figure,
+            key="single-session-quality-missing-timeline",
+            width="stretch",
+            config={"displaylogo": False},
+        )
+
+        summary_frame = detail_frame.sort_values("duration_ms", ascending=False).reset_index(drop=True)
+        summary_frame = summary_frame.loc[
+            :,
+            ["start_time_s", "end_time_s", "duration_ms", "percentage_of_total"],
+        ].copy()
+        summary_frame["start_time_s"] = summary_frame["start_time_s"].round(3)
+        summary_frame["end_time_s"] = summary_frame["end_time_s"].round(3)
+        summary_frame["duration_ms"] = summary_frame["duration_ms"].round(1)
+        summary_frame["percentage_of_total"] = summary_frame["percentage_of_total"].map(lambda value: f"{value:.1%}")
+        st.dataframe(summary_frame, use_container_width=True, hide_index=True)
+
+
 def _render_single_session(
     analysis: RecordingAnalysis,
     controls: DashboardControls,
@@ -553,6 +703,16 @@ def _render_single_session(
 ) -> None:
     st.subheader("单次会话分析链路")
     st.caption("输入数据 -> 预处理 -> 事件识别 -> 分段选择 -> Scanpath / Heatmap / 特征解释")
+    import_notice = st.session_state.pop(SCENARIO_IMPORT_NOTICE_KEY, None)
+    if import_notice:
+        st.success(import_notice)
+
+    quality_report = assess_quality(
+        recording=analysis.raw_recording,
+        preprocessed=analysis.processed_recording,
+    )
+    _render_quality_cards(quality_report, theme_name)
+    _render_quality_detail(analysis.raw_recording, quality_report, theme_name)
 
     overall = analysis.features
     metric_cols = st.columns(5)
@@ -624,6 +784,14 @@ def _render_single_session(
             width="stretch",
             config={"displaylogo": False},
         )
+
+    _render_aoi_section(
+        recording=display_analysis.enriched_recording,
+        stimulus_image=stimulus_image,
+        screen_size=screen_size,
+        theme_name=theme_name,
+        visual_controls=visual_controls,
+    )
 
     lower_left, lower_right = st.columns(2, gap="large")
     with lower_left:
@@ -802,7 +970,440 @@ def _render_stimulus_attention_section(
                 )
             )
 
+def _render_aoi_section(
+    *,
+    recording: GazeRecording,
+    stimulus_image: str | Path | Any | None,
+    screen_size: tuple[int, int],
+    theme_name: str,
+    visual_controls: VisualControls,
+) -> None:
+    with st.expander("兴趣区域 (AOI) 分析", expanded=False):
+        if not recording.events:
+            st.info("当前还没有可用于 AOI 分析的事件，请先完成数据加载和事件识别。")
+            return
 
+        fixations = fixation_table(recording)
+        if fixations.empty:
+            st.info("当前记录没有可用于 AOI 分析的 fixation 事件。")
+            return
+
+        if AOI_STATE_KEY not in st.session_state:
+            st.session_state[AOI_STATE_KEY] = []
+        if AOI_CANVAS_DRAFT_KEY not in st.session_state:
+            st.session_state[AOI_CANVAS_DRAFT_KEY] = None
+
+        left, right = st.columns([1.05, 1.35], gap="large")
+
+        with left:
+            st.markdown("### AOI 定义区")
+            st.caption("AOI 分析基于 fixation_table() 的注视中心，不直接操作原始 samples。")
+
+            mode = st.radio("AOI 定义方式", options=["手动输入", "鼠标绘制"], key="aoi-mode", horizontal=True)
+            if mode == "手动输入":
+                name = st.text_input(
+                    "AOI 名称",
+                    value=f"AOI {len(st.session_state[AOI_STATE_KEY]) + 1}",
+                    key="aoi-name",
+                )
+                x_col, y_col, x2_col, y2_col = st.columns(4)
+                x_min = float(
+                    x_col.number_input(
+                        "x_min",
+                        min_value=0.0,
+                        max_value=float(screen_size[0]),
+                        value=0.0,
+                        step=10.0,
+                    )
+                )
+                y_min = float(
+                    y_col.number_input(
+                        "y_min",
+                        min_value=0.0,
+                        max_value=float(screen_size[1]),
+                        value=0.0,
+                        step=10.0,
+                    )
+                )
+                x_max = float(
+                    x2_col.number_input(
+                        "x_max",
+                        min_value=0.0,
+                        max_value=float(screen_size[0]),
+                        value=float(screen_size[0] / 2),
+                        step=10.0,
+                    )
+                )
+                y_max = float(
+                    y2_col.number_input(
+                        "y_max",
+                        min_value=0.0,
+                        max_value=float(screen_size[1]),
+                        value=float(screen_size[1] / 2),
+                        step=10.0,
+                    )
+                )
+
+                if st.button("添加 AOI", key="aoi-add-button", use_container_width=True):
+                    normalized_name = name.strip() or f"AOI {len(st.session_state[AOI_STATE_KEY]) + 1}"
+                    st.session_state[AOI_STATE_KEY] = [
+                        *st.session_state[AOI_STATE_KEY],
+                        define_aoi(normalized_name, x_min, y_min, x_max, y_max),
+                    ]
+            else:
+                _render_canvas_aoi_builder(stimulus_image=stimulus_image, screen_size=screen_size)
+                st.caption("示例 AOI 和手动输入会直接作用于分析结果，不自动回填到画布。")
+
+            example_cols = st.columns(3)
+            if example_cols[0].button("示例: 屏幕四象限", key="aoi-example-quadrants", use_container_width=True):
+                st.session_state[AOI_STATE_KEY] = _example_quadrant_aois(screen_size)
+            if example_cols[1].button("示例: 顶栏+内容区", key="aoi-example-layout", use_container_width=True):
+                st.session_state[AOI_STATE_KEY] = _example_layout_aois(screen_size)
+            if example_cols[2].button("清空 AOI", key="aoi-clear", use_container_width=True):
+                st.session_state[AOI_STATE_KEY] = []
+
+            aois = list(st.session_state[AOI_STATE_KEY])
+            if aois:
+                st.dataframe(_aoi_definition_frame(aois), use_container_width=True, hide_index=True)
+                _render_aoi_name_editor(aois)
+                aois = list(st.session_state[AOI_STATE_KEY])
+                st.plotly_chart(
+                    _build_aoi_scanpath_figure(
+                        recording=recording,
+                        aois=aois,
+                        stimulus_image=stimulus_image,
+                        screen_size=screen_size,
+                        theme_name=theme_name,
+                        visual_controls=visual_controls,
+                    ),
+                    key=AOI_SCANPATH_KEY,
+                    width="stretch",
+                    config={"displaylogo": False},
+                )
+            else:
+                st.info("先手动添加 AOI，或点击上方示例按钮快速生成一组区域。")
+
+        with right:
+            st.markdown("### AOI 分析结果")
+            aois = list(st.session_state[AOI_STATE_KEY])
+            if not aois:
+                st.info("定义至少一个 AOI 后，系统会显示指标汇总表和转移矩阵。")
+                return
+
+            assigned = assign_fixations_to_aoi(fixations, aois)
+            metrics = compute_aoi_metrics(assigned, aois, total_duration=recording.duration_ms)
+            metric_frame = _aoi_metrics_frame(metrics)
+            st.dataframe(metric_frame, use_container_width=True, hide_index=True)
+
+            transition_matrix = compute_transition_matrix(assigned, [aoi.name for aoi in aois])
+            st.plotly_chart(
+                _build_aoi_transition_figure(transition_matrix, theme_name=theme_name),
+                key=AOI_TRANSITION_KEY,
+                width="stretch",
+                config={"displaylogo": False},
+            )
+
+
+def _render_canvas_aoi_builder(
+    *,
+    stimulus_image: str | Path | Any | None,
+    screen_size: tuple[int, int],
+) -> None:
+    if not _HAS_AOI_CANVAS or st_canvas is None:
+        st.warning("当前环境未启用鼠标绘制组件，请继续使用手动输入模式。")
+        return
+
+    canvas_width, canvas_height = _aoi_canvas_dimensions(screen_size)
+    canvas_background = _load_canvas_background_image(stimulus_image)
+    canvas_result = st_canvas(
+        fill_color="rgba(0, 243, 255, 0.14)",
+        stroke_width=2,
+        stroke_color="rgba(0, 243, 255, 0.90)",
+        background_image=canvas_background,
+        background_color=PAPER,
+        width=canvas_width,
+        height=canvas_height,
+        drawing_mode="rect",
+        display_toolbar=True,
+        update_streamlit=True,
+        initial_drawing=st.session_state.get(AOI_CANVAS_DRAFT_KEY),
+        key="aoi-canvas-v1",
+    )
+    current_canvas_json = canvas_result.json_data if canvas_result is not None else None
+    if current_canvas_json is not None:
+        st.session_state[AOI_CANVAS_DRAFT_KEY] = current_canvas_json
+
+    st.caption("仅支持矩形。绘制完成后点击下方按钮，才会覆盖当前 AOI 分析结果。")
+    if st.button("用画布覆盖当前 AOI", key="aoi-apply-canvas", use_container_width=True):
+        aois = _parse_canvas_rectangles_to_aois(
+            current_canvas_json or st.session_state.get(AOI_CANVAS_DRAFT_KEY),
+            canvas_width=canvas_width,
+            canvas_height=canvas_height,
+            screen_size=screen_size,
+        )
+        if not aois:
+            st.warning("请先绘制至少一个矩形 AOI。")
+        else:
+            st.session_state[AOI_STATE_KEY] = aois
+
+
+def _render_aoi_name_editor(aois: list[AOI]) -> None:
+    st.caption("已应用 AOI 可在此重命名。重新从画布覆盖后，将按当前矩形列表重新生成默认名称。")
+    with st.form("aoi-rename-form"):
+        renamed: list[str] = []
+        for index, aoi in enumerate(aois):
+            renamed.append(
+                st.text_input(
+                    f"AOI {index + 1} 名称",
+                    value=aoi.name,
+                    key=f"aoi-rename-{index}-{_aoi_name_editor_suffix(aoi)}",
+                )
+            )
+        submitted = st.form_submit_button("更新 AOI 名称", use_container_width=True)
+
+    if submitted:
+        st.session_state[AOI_STATE_KEY] = [
+            AOI(
+                name=(name.strip() or f"AOI {index + 1}"),
+                region=aoi.region,
+                region_type=aoi.region_type,
+            )
+            for index, (aoi, name) in enumerate(zip(aois, renamed))
+        ]
+
+
+def _aoi_name_editor_suffix(aoi: AOI) -> str:
+    if aoi.region_type == "rectangle":
+        return "-".join(f"{float(value):.1f}" for value in aoi.region)
+    return "-".join(f"{float(x):.1f}-{float(y):.1f}" for x, y in aoi.region)
+
+
+def _aoi_canvas_dimensions(screen_size: tuple[int, int]) -> tuple[int, int]:
+    canvas_width = AOI_CANVAS_WIDTH
+    canvas_height = max(180, round(canvas_width * screen_size[1] / max(screen_size[0], 1)))
+    return canvas_width, canvas_height
+
+
+def _load_canvas_background_image(stimulus_image: str | Path | Any | None) -> Image.Image | None:
+    if stimulus_image is None:
+        return None
+
+    if isinstance(stimulus_image, (str, Path)):
+        image = Image.open(Path(stimulus_image))
+    else:
+        if hasattr(stimulus_image, "seek"):
+            stimulus_image.seek(0)
+        image = Image.open(stimulus_image)
+    return image.convert("RGBA")
+
+
+def _parse_canvas_rectangles_to_aois(
+    json_data: dict[str, Any] | None,
+    *,
+    canvas_width: int,
+    canvas_height: int,
+    screen_size: tuple[int, int],
+) -> list[AOI]:
+    if not json_data:
+        return []
+
+    objects = json_data.get("objects")
+    if not isinstance(objects, list):
+        return []
+
+    scale_x = screen_size[0] / max(canvas_width, 1)
+    scale_y = screen_size[1] / max(canvas_height, 1)
+    aois: list[AOI] = []
+    for obj in objects:
+        if not isinstance(obj, dict) or obj.get("type") != "rect":
+            continue
+        if float(obj.get("angle", 0.0)) != 0.0:
+            continue
+
+        width = float(obj.get("width", 0.0))
+        height = float(obj.get("height", 0.0))
+        scaled_width = width * float(obj.get("scaleX", 1.0))
+        scaled_height = height * float(obj.get("scaleY", 1.0))
+        if scaled_width < 8.0 or scaled_height < 8.0:
+            continue
+
+        left = float(obj.get("left", 0.0))
+        top = float(obj.get("top", 0.0))
+        aois.append(
+            define_aoi(
+                f"AOI {len(aois) + 1}",
+                left * scale_x,
+                top * scale_y,
+                (left + scaled_width) * scale_x,
+                (top + scaled_height) * scale_y,
+            )
+        )
+    return aois
+
+
+def _example_quadrant_aois(screen_size: tuple[int, int]) -> list[AOI]:
+    width, height = screen_size
+    mid_x = width / 2
+    mid_y = height / 2
+    return [
+        define_aoi("左上", 0, 0, mid_x, mid_y),
+        define_aoi("右上", mid_x, 0, width, mid_y),
+        define_aoi("左下", 0, mid_y, mid_x, height),
+        define_aoi("右下", mid_x, mid_y, width, height),
+    ]
+
+
+def _example_layout_aois(screen_size: tuple[int, int]) -> list[AOI]:
+    width, height = screen_size
+    header_height = height * 0.16
+    side_width = width * 0.28
+    return [
+        define_aoi("顶部导航", 0, 0, width, header_height),
+        define_aoi("左侧内容", 0, header_height, side_width, height),
+        define_aoi("主内容区", side_width, header_height, width, height),
+    ]
+
+
+def _aoi_definition_frame(aois: list[AOI]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for aoi in aois:
+        rows.append(
+            {
+                "AOI 名称": aoi.name,
+                "类型": "矩形" if aoi.region_type == "rectangle" else "多边形",
+                "区域": _describe_aoi_region(aoi),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _describe_aoi_region(aoi: AOI) -> str:
+    if aoi.region_type == "rectangle":
+        x_min, y_min, x_max, y_max = aoi.region
+        return f"({x_min:.0f}, {y_min:.0f}) -> ({x_max:.0f}, {y_max:.0f})"
+    return " -> ".join(f"({x:.0f}, {y:.0f})" for x, y in aoi.region)
+
+
+def _build_aoi_scanpath_figure(
+    *,
+    recording: GazeRecording,
+    aois: list[AOI],
+    stimulus_image: str | Path | Any | None,
+    screen_size: tuple[int, int],
+    theme_name: str,
+    visual_controls: VisualControls,
+) -> go.Figure:
+    figure = plot_interactive_scanpath(
+        recording,
+        background_image=stimulus_image,
+        screen_size=screen_size,
+        theme_name=theme_name,
+        palette=visual_controls.scanpath_palette,
+        fixation_opacity=visual_controls.fixation_opacity,
+    )
+    figure.update_xaxes(range=[0.0, float(screen_size[0])])
+    figure.update_yaxes(range=[float(screen_size[1]), 0.0])
+    figure.update_layout(title="AOI 叠加 Scanpath")
+    _overlay_aoi_shapes(figure, aois)
+    return figure
+
+
+def _overlay_aoi_shapes(figure: go.Figure, aois: list[AOI]) -> None:
+    palette = [
+        ("rgba(0, 243, 255, 0.14)", "rgba(0, 243, 255, 0.88)"),
+        ("rgba(0, 255, 157, 0.14)", "rgba(0, 255, 157, 0.88)"),
+        ("rgba(255, 181, 90, 0.16)", "rgba(255, 181, 90, 0.88)"),
+        ("rgba(125, 158, 255, 0.16)", "rgba(125, 158, 255, 0.88)"),
+    ]
+
+    for index, aoi in enumerate(aois):
+        fill_color, line_color = palette[index % len(palette)]
+        if aoi.region_type == "rectangle":
+            x_min, y_min, x_max, y_max = aoi.region
+            figure.add_shape(
+                type="rect",
+                x0=x_min,
+                y0=y_min,
+                x1=x_max,
+                y1=y_max,
+                line={"color": line_color, "width": 2},
+                fillcolor=fill_color,
+                layer="above",
+            )
+            label_x = float(x_min) + 8.0
+            label_y = float(y_min) + 12.0
+        else:
+            vertices = [(float(x), float(y)) for x, y in aoi.region]
+            path = "M " + " L ".join(f"{x},{y}" for x, y in vertices) + " Z"
+            figure.add_shape(
+                type="path",
+                path=path,
+                line={"color": line_color, "width": 2},
+                fillcolor=fill_color,
+                layer="above",
+            )
+            label_x = float(np.mean([x for x, _ in vertices]))
+            label_y = float(np.mean([y for _, y in vertices]))
+
+        figure.add_annotation(
+            x=label_x,
+            y=label_y,
+            text=aoi.name,
+            showarrow=False,
+            bgcolor="rgba(8, 23, 45, 0.82)",
+            bordercolor=line_color,
+            borderpad=5,
+            font={"color": "#EAF7FF", "size": 11},
+        )
+
+
+def _aoi_metrics_frame(metrics: dict[str, Any]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for metric in metrics.values():
+        rows.append(
+            {
+                "AOI": metric.aoi_name,
+                "TTFF (ms)": np.nan if metric.first_fixation_time is None else metric.first_fixation_time,
+                "总驻留时长 (ms)": metric.total_dwell_time,
+                "驻留占比": metric.dwell_proportion,
+                "注视次数": metric.fixation_count,
+                "访问次数": metric.visit_count,
+                "回视次数": metric.revisit_count,
+                "平均注视时长 (ms)": metric.mean_fixation_duration,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _build_aoi_transition_figure(matrix: pd.DataFrame, *, theme_name: str) -> go.Figure:
+    template = "plotly_white" if theme_name == "light" else "plotly_dark"
+    text_values = matrix.map(lambda value: f"{value:.2f}")
+    figure = go.Figure(
+        data=
+        [
+            go.Heatmap(
+                z=matrix.to_numpy(dtype=float),
+                x=matrix.columns.tolist(),
+                y=matrix.index.tolist(),
+                zmin=0.0,
+                zmax=1.0,
+                colorscale="Blues",
+                text=text_values.to_numpy(),
+                texttemplate="%{text}",
+                hovertemplate="来源=%{y}<br>目标=%{x}<br>概率=%{z:.2f}<extra></extra>",
+                colorbar={"title": "转移概率"},
+            )
+        ]
+    )
+    figure.update_layout(
+        title="AOI 转移矩阵热力图",
+        template=template,
+        height=380,
+        margin={"l": 32, "r": 20, "t": 48, "b": 28},
+        xaxis={"title": "目标 AOI"},
+        yaxis={"title": "来源 AOI"},
+    )
+    return figure
 def _render_segment_selector(segment_views: list[SegmentView]) -> SegmentView | None:
     if not segment_views:
         return None
@@ -855,10 +1456,14 @@ def _render_panel_table(
 
 def _render_modeling_workbench(theme_name: str = "dark") -> None:
     st.subheader("意图建模实验台")
+    linked_scenario = st.session_state.get(SCENARIO_LINKED_KEY)
+    if linked_scenario:
+        st.caption(f"当前联动研究模板：{linked_scenario}")
     controls = st.columns([1, 1, 1])
     num_sessions = int(controls[0].slider("合成会话数", min_value=12, max_value=80, value=32, step=4))
     model_label = controls[1].selectbox("模型类型", options=list(MODEL_OPTIONS), index=0)
     random_state = int(controls[2].slider("实验随机种子", min_value=1, max_value=999, value=42))
+    feature_df = _build_statistics_feature_dataset(num_sessions=num_sessions, random_state=random_state)
 
     report = run_intent_experiment(
         num_sessions=num_sessions,
@@ -901,6 +1506,441 @@ def _render_modeling_workbench(theme_name: str = "dark") -> None:
             }
         )
         _render_panel_table(importance, hide_index=True, max_height_px=360)
+
+    _render_statistics_section(feature_df=feature_df, theme_name=theme_name)
+
+
+def _build_statistics_feature_dataset(num_sessions: int, random_state: int) -> pd.DataFrame:
+    subject_count = max(2, num_sessions // 2)
+    recordings: list[GazeRecording] = []
+    session_id = 0
+
+    for subject_index in range(subject_count):
+        for condition_index, condition in enumerate(("careful", "skim")):
+            recording = simulate_gaze_recording(style=condition, seed=random_state + subject_index * 31 + condition_index)
+            recording.metadata.update(
+                {
+                    "session_id": session_id,
+                    "subject_id": f"S{subject_index + 1:02d}",
+                    "condition": condition,
+                    "trial": 1,
+                    "intent_label": condition,
+                }
+            )
+            recordings.append(recording)
+            session_id += 1
+
+    return build_feature_dataset(recordings, target_key="intent_label")
+
+
+def _render_statistics_section(*, feature_df: pd.DataFrame, theme_name: str) -> None:
+    with st.expander("统计分析", expanded=False):
+        if len(feature_df) < 2:
+            st.info("至少需要 2 条 recording 才能进行统计分析。")
+            return
+        if "condition" not in feature_df.columns:
+            st.info("当前特征表没有 condition 列，无法进行条件对比。")
+            return
+
+        condition_values = [value for value in feature_df["condition"].dropna().astype(str).unique().tolist()]
+        if len(condition_values) < 2:
+            st.info("当前数据中少于 2 个 condition，无法进行统计分析。")
+            return
+
+        numeric_columns = [
+            column
+            for column in feature_df.select_dtypes(include=[np.number]).columns
+            if column not in {"session_id", "trial"}
+        ]
+        if not numeric_columns:
+            st.info("当前特征表没有可用于统计分析的数值指标。")
+            return
+
+        st.caption("统计分析基于 build_feature_dataset() 产出的 subject × condition 粒度特征表。")
+        controls_top = st.columns([1.2, 1.6, 1.1, 1.0], gap="large")
+        selected_conditions = controls_top[0].multiselect(
+            "条件选择",
+            options=condition_values,
+            default=condition_values[:2],
+            max_selections=2,
+        )
+        selected_metrics = controls_top[1].multiselect(
+            "指标选择",
+            options=numeric_columns,
+            default=[metric for metric in ["fixation_count", "fixation_duration_mean", "path_length"] if metric in numeric_columns]
+            or numeric_columns[:3],
+            format_func=_localize_feature_name,
+        )
+        test_mode = controls_top[2].selectbox("检验类型", options=["自动选择", "参数检验", "非参数检验"], index=0)
+        paired = controls_top[3].toggle("配对设计", value=True)
+
+        if len(selected_conditions) != 2:
+            st.info("请选择恰好 2 个 condition。")
+            return
+        if not selected_metrics:
+            st.info("请至少选择 1 个指标。")
+            return
+
+        filtered_df = feature_df.loc[feature_df["condition"].isin(selected_conditions)].copy()
+        subject_col = "subject_id" if "subject_id" in filtered_df.columns else None
+
+        try:
+            descriptive = descriptive_table(filtered_df, "condition", selected_metrics)
+            results = _run_statistics_comparison(
+                feature_df=filtered_df,
+                selected_conditions=selected_conditions,
+                selected_metrics=selected_metrics,
+                test_mode=test_mode,
+                paired=paired,
+                subject_col=subject_col,
+            )
+        except ImportError as exc:
+            st.warning(str(exc))
+            return
+        except ValueError as exc:
+            st.warning(str(exc))
+            return
+
+        st.markdown("**描述性统计表**")
+        st.dataframe(_format_descriptive_table(descriptive), use_container_width=True, hide_index=True)
+
+        st.markdown("**检验结果汇总**")
+        result_display = _format_statistics_results(results)
+        st.dataframe(result_display, use_container_width=True, hide_index=True)
+
+        lower_left, lower_right = st.columns(2, gap="large")
+        with lower_left:
+            st.markdown("**箱线图对比**")
+            st.plotly_chart(
+                _build_statistics_boxplot(
+                    feature_df=filtered_df,
+                    selected_conditions=selected_conditions,
+                    selected_metrics=selected_metrics,
+                    theme_name=theme_name,
+                ),
+                key="statistics-boxplot",
+                width="stretch",
+                config={"displaylogo": False},
+            )
+        with lower_right:
+            st.markdown("**效应量森林图**")
+            st.plotly_chart(
+                _build_effect_size_forest(
+                    feature_df=filtered_df,
+                    results=results,
+                    selected_conditions=selected_conditions,
+                    paired=paired,
+                    subject_col=subject_col,
+                    theme_name=theme_name,
+                ),
+                key="statistics-effect-forest",
+                width="stretch",
+                config={"displaylogo": False},
+            )
+
+
+def _run_statistics_comparison(
+    *,
+    feature_df: pd.DataFrame,
+    selected_conditions: list[str],
+    selected_metrics: list[str],
+    test_mode: str,
+    paired: bool,
+    subject_col: str | None,
+) -> pd.DataFrame:
+    if test_mode == "自动选择":
+        return compare_conditions(
+            feature_df,
+            condition_col="condition",
+            metric_cols=selected_metrics,
+            paired=paired,
+            subject_col=subject_col,
+        )
+
+    rows: list[dict[str, object]] = []
+    _validate_dashboard_granularity(feature_df, condition_col="condition", subject_col=subject_col)
+
+    for metric in selected_metrics:
+        group1, group2 = _extract_metric_groups(
+            feature_df=feature_df,
+            metric=metric,
+            selected_conditions=selected_conditions,
+            paired=paired,
+            subject_col=subject_col,
+        )
+        if test_mode == "参数检验":
+            result = paired_t_test(group1, group2, var_name=metric) if paired else independent_t_test(group1, group2, var_name=metric)
+        else:
+            result = wilcoxon_test(group1, group2, var_name=metric) if paired else mann_whitney_test(group1, group2, var_name=metric)
+
+        rows.append(
+            {
+                "metric": metric,
+                "test_name": result.test_name,
+                "statistic": result.statistic,
+                "p_value": result.p_value,
+                "effect_size": result.effect_size,
+                "effect_size_name": result.effect_size_name,
+                "ci_lower": result.ci_lower,
+                "ci_upper": result.ci_upper,
+                "conclusion": result.conclusion,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def _validate_dashboard_granularity(feature_df: pd.DataFrame, *, condition_col: str, subject_col: str | None) -> None:
+    if subject_col is not None and subject_col in feature_df.columns:
+        duplicate_mask = feature_df.duplicated([subject_col, condition_col], keep=False)
+        if duplicate_mask.any():
+            raise ValueError("输入必须是 subject × condition 粒度的汇总表")
+
+
+def _extract_metric_groups(
+    *,
+    feature_df: pd.DataFrame,
+    metric: str,
+    selected_conditions: list[str],
+    paired: bool,
+    subject_col: str | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    subset_columns = ["condition", metric]
+    if subject_col is not None:
+        subset_columns.append(subject_col)
+    subset = feature_df[subset_columns].copy()
+    subset[metric] = pd.to_numeric(subset[metric], errors="coerce")
+    subset = subset.dropna(subset=["condition", metric])
+
+    if paired:
+        if subject_col is None:
+            raise ValueError("配对检验需要 subject_id 列。")
+        pivot = subset.pivot(index=subject_col, columns="condition", values=metric)
+        pivot = pivot.reindex(columns=selected_conditions).dropna()
+        if len(pivot) < 2:
+            raise ValueError("当前数据不足以形成有效的配对样本。")
+        return (
+            pivot[selected_conditions[0]].to_numpy(dtype=float),
+            pivot[selected_conditions[1]].to_numpy(dtype=float),
+        )
+
+    left = subset.loc[subset["condition"] == selected_conditions[0], metric].dropna().to_numpy(dtype=float)
+    right = subset.loc[subset["condition"] == selected_conditions[1], metric].dropna().to_numpy(dtype=float)
+    if len(left) < 2 or len(right) < 2:
+        raise ValueError("每个 condition 至少需要 2 个有效观测。")
+    return left, right
+
+
+def _format_descriptive_table(frame: pd.DataFrame) -> pd.DataFrame:
+    display = frame.copy()
+    if display.empty:
+        return display
+    display["metric"] = display["metric"].map(_localize_feature_name)
+    display["condition"] = display["condition"].astype(str)
+    rename_map = {
+        "condition": "条件",
+        "metric": "指标",
+        "mean": "均值",
+        "sd": "标准差",
+        "median": "中位数",
+        "min": "最小值",
+        "max": "最大值",
+        "n": "样本量",
+        "ci_lower": "CI 下界",
+        "ci_upper": "CI 上界",
+    }
+    return display.rename(columns=rename_map)
+
+
+def _format_statistics_results(frame: pd.DataFrame) -> pd.DataFrame:
+    display = frame.copy()
+    if display.empty:
+        return display
+    display["metric"] = display["metric"].map(_localize_feature_name)
+    display["显著性"] = display["p_value"].map(_significance_stars)
+    display["p 值"] = display["p_value"].map(_format_p_for_display)
+    display = display.rename(
+        columns={
+            "metric": "指标",
+            "test_name": "检验",
+            "statistic": "统计量",
+            "effect_size": "效应量",
+            "effect_size_name": "效应量类型",
+            "ci_lower": "CI 下界",
+            "ci_upper": "CI 上界",
+            "conclusion": "结论",
+        }
+    )
+    return display[
+        ["指标", "检验", "统计量", "p 值", "显著性", "效应量", "效应量类型", "CI 下界", "CI 上界", "结论"]
+    ]
+
+
+def _build_statistics_boxplot(
+    *,
+    feature_df: pd.DataFrame,
+    selected_conditions: list[str],
+    selected_metrics: list[str],
+    theme_name: str,
+) -> go.Figure:
+    figure = go.Figure()
+    for condition in selected_conditions:
+        condition_frame = feature_df.loc[feature_df["condition"] == condition]
+        for metric in selected_metrics:
+            values = pd.to_numeric(condition_frame[metric], errors="coerce").dropna()
+            figure.add_trace(
+                go.Box(
+                    x=[_localize_feature_name(metric)] * len(values),
+                    y=values,
+                    name=str(condition),
+                    boxmean=True,
+                    legendgroup=str(condition),
+                    offsetgroup=str(condition),
+                )
+            )
+
+    figure.update_layout(
+        title="条件间箱线图对比",
+        template="plotly_white" if theme_name == "light" else "plotly_dark",
+        height=420,
+        margin={"l": 24, "r": 16, "t": 48, "b": 36},
+        xaxis={"title": "指标"},
+        yaxis={"title": "数值"},
+        boxmode="group",
+    )
+    return figure
+
+
+def _build_effect_size_forest(
+    *,
+    feature_df: pd.DataFrame,
+    results: pd.DataFrame,
+    selected_conditions: list[str],
+    paired: bool,
+    subject_col: str | None,
+    theme_name: str,
+) -> go.Figure:
+    plot_frame = results.copy()
+    if plot_frame.empty:
+        return go.Figure()
+
+    ci_bounds = [
+        _estimate_effect_ci(
+            feature_df=feature_df,
+            metric=row.metric,
+            effect_size=float(row.effect_size),
+            ci_lower=float(row.ci_lower),
+            ci_upper=float(row.ci_upper),
+            selected_conditions=selected_conditions,
+            paired=paired,
+            subject_col=subject_col,
+        )
+        for row in plot_frame.itertuples(index=False)
+    ]
+    plot_frame["effect_ci_lower"] = [bounds[0] for bounds in ci_bounds]
+    plot_frame["effect_ci_upper"] = [bounds[1] for bounds in ci_bounds]
+    plot_frame["metric_label"] = plot_frame["metric"].map(_localize_feature_name)
+
+    error_minus = np.where(
+        np.isfinite(plot_frame["effect_ci_lower"]),
+        plot_frame["effect_size"] - plot_frame["effect_ci_lower"],
+        0.0,
+    )
+    error_plus = np.where(
+        np.isfinite(plot_frame["effect_ci_upper"]),
+        plot_frame["effect_ci_upper"] - plot_frame["effect_size"],
+        0.0,
+    )
+
+    figure = go.Figure(
+        data=[
+            go.Scatter(
+                x=plot_frame["effect_size"],
+                y=plot_frame["metric_label"],
+                mode="markers",
+                marker={"size": 11, "color": "#00bfe8"},
+                error_x={
+                    "type": "data",
+                    "symmetric": False,
+                    "array": error_plus,
+                    "arrayminus": error_minus,
+                    "visible": True,
+                },
+                customdata=plot_frame[["effect_size_name", "conclusion"]],
+                hovertemplate="指标=%{y}<br>效应量=%{x:.2f}<br>类型=%{customdata[0]}<br>%{customdata[1]}<extra></extra>",
+            )
+        ]
+    )
+    figure.add_vline(x=0.0, line_dash="dash", line_color="rgba(255,255,255,0.35)")
+    figure.update_layout(
+        title="效应量森林图",
+        template="plotly_white" if theme_name == "light" else "plotly_dark",
+        height=420,
+        margin={"l": 24, "r": 16, "t": 48, "b": 36},
+        xaxis={"title": "效应量"},
+        yaxis={"title": "指标"},
+    )
+    return figure
+
+
+def _estimate_effect_ci(
+    *,
+    feature_df: pd.DataFrame,
+    metric: str,
+    effect_size: float,
+    ci_lower: float,
+    ci_upper: float,
+    selected_conditions: list[str],
+    paired: bool,
+    subject_col: str | None,
+) -> tuple[float, float]:
+    if not np.isfinite(ci_lower) or not np.isfinite(ci_upper):
+        return (float("nan"), float("nan"))
+
+    group1, group2 = _extract_metric_groups(
+        feature_df=feature_df,
+        metric=metric,
+        selected_conditions=selected_conditions,
+        paired=paired,
+        subject_col=subject_col,
+    )
+    if paired:
+        differences = group2 - group1
+        scale = float(np.std(differences, ddof=1))
+    else:
+        scale = _effect_ci_scale(group1, group2)
+
+    if not np.isfinite(scale) or scale == 0.0:
+        return (float(effect_size), float(effect_size))
+    return (float(ci_lower / scale), float(ci_upper / scale))
+
+
+def _effect_ci_scale(group1: np.ndarray, group2: np.ndarray) -> float:
+    n1 = len(group1)
+    n2 = len(group2)
+    if n1 < 2 or n2 < 2:
+        return float("nan")
+    var1 = float(np.var(group1, ddof=1))
+    var2 = float(np.var(group2, ddof=1))
+    pooled_var = (((n1 - 1) * var1) + ((n2 - 1) * var2)) / max(n1 + n2 - 2, 1)
+    return float(np.sqrt(max(pooled_var, 0.0)))
+
+
+def _significance_stars(p_value: float) -> str:
+    if p_value < 0.001:
+        return "***"
+    if p_value < 0.01:
+        return "**"
+    if p_value < 0.05:
+        return "*"
+    return ""
+
+
+def _format_p_for_display(p_value: float) -> str:
+    if p_value < 0.001:
+        return "< .001"
+    text = f"{p_value:.3f}"
+    return text[1:] if text.startswith("0") else text
 
 
 def _render_multimodal_tab(recording: GazeRecording, theme_name: str = "dark") -> None:
@@ -955,6 +1995,249 @@ def _render_multimodal_tab(recording: GazeRecording, theme_name: str = "dark") -
     )
 
 
+def _render_batch_tab(theme_name: str = "dark") -> None:
+    st.subheader("批量分析")
+    uploaded_files = st.file_uploader(
+        "上传多个眼动数据文件",
+        type=["csv", "tsv", "txt"],
+        accept_multiple_files=True,
+        key="batch-file-uploader",
+    )
+
+    current_aois = list(st.session_state.get(AOI_STATE_KEY, []))
+    config_cols = st.columns(2, gap="large")
+    include_complexity = config_cols[0].checkbox(
+        "包含复杂度特征（ApEn，大文件慎选）",
+        value=False,
+        key="batch-include-complexity",
+    )
+    use_current_aois = config_cols[1].checkbox(
+        "使用当前已定义的 AOI（如果 session_state 中存在）",
+        value=bool(current_aois),
+        disabled=not bool(current_aois),
+        key="batch-use-current-aois",
+    )
+
+    if st.button("开始批量分析", key="batch-run-button", use_container_width=True):
+        if not uploaded_files:
+            st.warning("请先上传至少一个眼动数据文件。")
+        else:
+            temp_dir = Path(tempfile.mkdtemp(prefix="gaze-toolkit-batch-"))
+            aois = current_aois if use_current_aois and current_aois else None
+            progress = st.progress(0.0)
+            try:
+                saved_paths = _save_uploaded_batch_files(uploaded_files, temp_dir)
+                result_frames: list[pd.DataFrame] = []
+                with st.status("准备批量分析...", expanded=True) as status:
+                    total_files = len(saved_paths)
+                    for index, path in enumerate(saved_paths, start=1):
+                        status.update(label=f"正在分析 {path.name} ({index}/{total_files})", state="running")
+                        status.write(f"已提交文件：{path.name}")
+                        result_frames.append(
+                            batch_analyze(
+                                [path],
+                                include_complexity=include_complexity,
+                                aois=aois,
+                            )
+                        )
+                        progress.progress(index / max(total_files, 1))
+
+                    batch_df = (
+                        pd.concat(result_frames, ignore_index=True)
+                        if result_frames
+                        else pd.DataFrame(columns=["file_path", "error"])
+                    )
+                    st.session_state[BATCH_RESULTS_KEY] = batch_df
+                    status.update(label="批量分析完成", state="complete")
+            except Exception as exc:
+                st.error(f"批量分析执行失败：{exc}")
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    batch_df = st.session_state.get(BATCH_RESULTS_KEY)
+    if not isinstance(batch_df, pd.DataFrame) or batch_df.empty:
+        st.info("上传多个文件并点击“开始批量分析”后，这里会显示批量结果、CSV 下载和报告导出。")
+        return
+
+    st.markdown("---")
+    st.markdown("### 分析结果")
+    success_df = _successful_batch_rows(batch_df)
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("总文件数", int(len(batch_df)))
+    metric_cols[1].metric("成功", int(len(success_df)))
+    metric_cols[2].metric("失败", int(len(batch_df) - len(success_df)))
+    metric_cols[3].metric("平均质量等级", _mean_quality_grade_label(success_df))
+
+    quality_counts = _quality_counts_frame(batch_df)
+    if not quality_counts.empty:
+        st.plotly_chart(
+            _build_batch_quality_figure(quality_counts, theme_name=theme_name),
+            key="batch-quality-chart",
+            width="stretch",
+            config={"displaylogo": False},
+        )
+
+    st.markdown("**关键指标描述统计表**")
+    st.dataframe(_build_batch_summary_table(batch_df), use_container_width=True, hide_index=True)
+
+    st.markdown("**完整特征表**")
+    styled_batch_df = _style_batch_results(batch_df)
+    st.dataframe(
+        styled_batch_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "file_path": st.column_config.TextColumn("file_path", width="large"),
+            "error": st.column_config.TextColumn("error", width="large"),
+        },
+    )
+
+    st.download_button(
+        "下载 CSV",
+        data=batch_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="gaze_toolkit_batch_results.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="batch-download-csv",
+    )
+
+    st.markdown("### 报告导出")
+    scenario_name = str(st.session_state.get(SCENARIO_LINKED_KEY, ""))
+    html_content = build_html_report_content(batch_df, scenario_name=scenario_name)
+    markdown_content = build_markdown_report_content(batch_df, scenario_name=scenario_name)
+    export_cols = st.columns(2, gap="large")
+    export_cols[0].download_button(
+        "导出 HTML 报告",
+        data=html_content,
+        file_name="gaze_toolkit_batch_report.html",
+        mime="text/html",
+        use_container_width=True,
+        key="batch-download-html",
+    )
+    export_cols[1].download_button(
+        "导出 Markdown 报告",
+        data=markdown_content,
+        file_name="gaze_toolkit_batch_report.md",
+        mime="text/markdown",
+        use_container_width=True,
+        key="batch-download-markdown",
+    )
+
+
+def _save_uploaded_batch_files(uploaded_files: list[Any], temp_dir: Path) -> list[Path]:
+    paths: list[Path] = []
+    for index, uploaded in enumerate(uploaded_files, start=1):
+        original_name = Path(uploaded.name or f"recording_{index}.csv")
+        safe_name = f"{index:03d}_{original_name.name}"
+        destination = temp_dir / safe_name
+        destination.write_bytes(uploaded.getbuffer())
+        paths.append(destination)
+    return paths
+
+
+def _successful_batch_rows(batch_df: pd.DataFrame) -> pd.DataFrame:
+    if "error" not in batch_df.columns:
+        return batch_df.copy()
+    errors = batch_df["error"].fillna("").astype(str).str.strip()
+    return batch_df.loc[errors.eq("")].copy()
+
+
+def _quality_counts_frame(batch_df: pd.DataFrame) -> pd.DataFrame:
+    if "quality_grade" not in batch_df.columns:
+        return pd.DataFrame(columns=["quality_grade", "count"])
+
+    order = ["优", "良", "可用", "建议剔除", "未知"]
+    distribution = (
+        batch_df["quality_grade"]
+        .fillna("未知")
+        .astype(str)
+        .value_counts()
+        .reindex(order, fill_value=0)
+        .rename_axis("quality_grade")
+        .reset_index(name="count")
+    )
+    return distribution.loc[distribution["count"] > 0].reset_index(drop=True)
+
+
+def _build_batch_quality_figure(quality_counts: pd.DataFrame, *, theme_name: str) -> go.Figure:
+    figure = go.Figure(
+        data=[
+            go.Bar(
+                x=quality_counts["quality_grade"],
+                y=quality_counts["count"],
+                marker={"color": ["#0fb8ad", "#5fbf68", "#f0a63a", "#d15a5a", "#8a9cb4"][: len(quality_counts)]},
+                hovertemplate="质量等级=%{x}<br>记录数=%{y}<extra></extra>",
+            )
+        ]
+    )
+    figure.update_layout(
+        title="质量分布",
+        template="plotly_white" if theme_name == "light" else "plotly_dark",
+        height=320,
+        margin={"l": 20, "r": 12, "t": 46, "b": 24},
+        xaxis={"title": "质量等级"},
+        yaxis={"title": "记录数"},
+    )
+    return figure
+
+
+def _build_batch_summary_table(batch_df: pd.DataFrame) -> pd.DataFrame:
+    success_df = _successful_batch_rows(batch_df)
+    rows: list[dict[str, object]] = []
+    for metric in ["fixation_count", "fixation_duration_mean", "saccade_count", "valid_ratio"]:
+        if metric not in success_df.columns:
+            continue
+        values = pd.to_numeric(success_df[metric], errors="coerce").dropna()
+        if values.empty:
+            continue
+        rows.append(
+            {
+                "metric": _localize_feature_name(metric),
+                "mean": round(float(values.mean()), 4),
+                "sd": round(float(values.std(ddof=1)) if len(values) > 1 else 0.0, 4),
+                "n": int(len(values)),
+                "note": "",
+            }
+        )
+
+    if "quality_grade" in success_df.columns and not success_df.empty:
+        quality_mode = success_df["quality_grade"].dropna().astype(str)
+        rows.append(
+            {
+                "metric": "质量等级",
+                "mean": "",
+                "sd": "",
+                "n": int(len(quality_mode)),
+                "note": quality_mode.mode().iloc[0] if not quality_mode.empty else "未知",
+            }
+        )
+
+    return pd.DataFrame(rows, columns=["metric", "mean", "sd", "n", "note"])
+
+
+def _mean_quality_grade_label(batch_df: pd.DataFrame) -> str:
+    if batch_df.empty or "quality_grade" not in batch_df.columns:
+        return "无"
+
+    score_map = {"建议剔除": 1.0, "可用": 2.0, "良": 3.0, "优": 4.0}
+    reverse_map = {1: "建议剔除", 2: "可用", 3: "良", 4: "优"}
+    scores = batch_df["quality_grade"].map(score_map).dropna()
+    if scores.empty:
+        return "未知"
+    rounded = int(min(max(round(float(scores.mean())), 1), 4))
+    return reverse_map[rounded]
+
+
+def _style_batch_results(batch_df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    def _style_row(row: pd.Series) -> list[str]:
+        has_error = bool(str(row.get("error", "")).strip()) if not pd.isna(row.get("error", "")) else False
+        if has_error:
+            return ["background-color: #fff0f0; color: #8f2d2d;" for _ in row]
+        return ["" for _ in row]
+
+    return batch_df.style.apply(_style_row, axis=1)
+
+
 def _render_portfolio_talking_points() -> None:
     st.subheader("项目解读")
     st.markdown(
@@ -984,6 +2267,137 @@ def _render_portfolio_talking_points() -> None:
         "这样 scanpath 和 heatmap 的底图映射会更精确。"
     )
     st.caption("项目作者：谭青松")
+
+
+def _render_scenario_tab() -> None:
+    st.subheader("产品评测场景")
+    scenario_names = list_scenarios()
+    if not scenario_names:
+        st.info("当前还没有可用的产品评测场景模板，请先在 `configs/scenarios/` 目录中添加 YAML 文件。")
+        return
+
+    option_labels = _scenario_option_labels(scenario_names)
+    selected_name = st.selectbox(
+        "场景选择",
+        options=scenario_names,
+        format_func=lambda value: option_labels.get(value, value),
+    )
+
+    try:
+        scenario = load_scenario(selected_name)
+    except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+        st.error(str(exc))
+        return
+
+    st.markdown("### 研究场景概览")
+    st.markdown(
+        f"**产品：** {scenario.product}  |  **设计类型：** {scenario.research_design.type}  |  "
+        f"**样本量：** {scenario.research_design.sample_size}"
+    )
+    st.markdown(f"**研究目标：** {scenario.research_goal}")
+    st.markdown(f"**华为相关性：** {scenario.huawei_relevance}")
+
+    design_col, plan_col = st.columns(2, gap="large")
+    with design_col:
+        st.markdown("### 实验设计")
+        st.markdown(f"**自变量：** {scenario.research_design.iv}")
+        for dv_group, items in scenario.research_design.dv.items():
+            st.markdown(f"**因变量（{_scenario_dv_label(dv_group)}）：**")
+            for item in items:
+                st.markdown(f"- {item}")
+        st.markdown(f"**样本量计算：** {scenario.research_design.sample_size}")
+        st.markdown(f"**平衡策略：** {scenario.research_design.counterbalancing}")
+
+    with plan_col:
+        st.markdown("### 分析计划")
+        st.markdown("**主要分析：**")
+        for item in scenario.analysis_plan.get("primary", []):
+            st.markdown(f"- {item}")
+        st.markdown("**次要分析：**")
+        for item in scenario.analysis_plan.get("secondary", []):
+            st.markdown(f"- {item}")
+        if st.button("与当前数据联动分析", key=f"scenario-link-{selected_name}", use_container_width=True):
+            st.session_state[SCENARIO_LINKED_KEY] = scenario.name
+            st.session_state[DASHBOARD_ACTIVE_TAB_KEY] = "意图建模实验"
+            st.rerun()
+
+    st.markdown("### 任务与 AOI 配置")
+    if not scenario.tasks:
+        st.info("当前场景还没有配置任务。")
+    elif len(scenario.tasks) <= 5:
+        task_tabs = st.tabs([task.id for task in scenario.tasks], key=f"scenario-task-tabs-{selected_name}")
+        for task, task_tab in zip(scenario.tasks, task_tabs, strict=True):
+            with task_tab:
+                _render_scenario_task_panel(scenario_name=scenario.name, selected_name=selected_name, task=task)
+    else:
+        selected_task_id = st.radio(
+            "任务切换",
+            options=[task.id for task in scenario.tasks],
+            horizontal=True,
+            key=f"scenario-task-radio-{selected_name}",
+        )
+        task = next(task for task in scenario.tasks if task.id == selected_task_id)
+        _render_scenario_task_panel(scenario_name=scenario.name, selected_name=selected_name, task=task)
+
+    with st.expander("查看完整 YAML 配置", expanded=False):
+        st.code(_scenario_yaml_text(selected_name), language="yaml")
+
+
+def _render_scenario_task_panel(*, scenario_name: str, selected_name: str, task: ScenarioTask) -> None:
+    st.markdown(f"**当前任务：{task.id} - {task.description}**")
+    st.dataframe(_scenario_task_frame(task), use_container_width=True, hide_index=True)
+    if st.button(
+        "导入到 AOI 分析",
+        key=f"scenario-import-{selected_name}-{task.id}",
+        use_container_width=True,
+    ):
+        scenario = load_scenario(selected_name)
+        st.session_state[AOI_STATE_KEY] = get_scenario_aois(scenario, task.id)
+        st.session_state[SCENARIO_LINKED_KEY] = scenario_name
+        st.session_state[SCENARIO_IMPORT_NOTICE_KEY] = f"已导入 {task.id} 的 AOI 配置，请继续查看单次会话分析。"
+        st.session_state[DASHBOARD_ACTIVE_TAB_KEY] = "单次会话分析"
+        st.rerun()
+
+
+def _scenario_option_labels(scenario_names: list[str]) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for scenario_name in scenario_names:
+        try:
+            labels[scenario_name] = load_scenario(scenario_name).name
+        except (FileNotFoundError, ValueError, yaml.YAMLError):
+            labels[scenario_name] = scenario_name
+    return labels
+
+
+def _scenario_dv_label(group_name: str) -> str:
+    return {
+        "eye_tracking": "眼动",
+        "behavior": "行为",
+        "subjective": "主观",
+    }.get(group_name, group_name)
+
+
+def _scenario_task_frame(task: ScenarioTask) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for region in task.aoi_regions:
+        x_min, y_min, x_max, y_max = region.region
+        rows.append(
+            {
+                "name": region.name,
+                "x_min": x_min,
+                "y_min": y_min,
+                "x_max": x_max,
+                "y_max": y_max,
+            }
+        )
+    return pd.DataFrame(rows, columns=["name", "x_min", "y_min", "x_max", "y_max"])
+
+
+def _scenario_yaml_text(scenario_name: str) -> str:
+    scenario_path = SCENARIOS_DIR / f"{scenario_name}.yaml"
+    if not scenario_path.exists():
+        return f"# 未找到场景配置：{scenario_path}"
+    return scenario_path.read_text(encoding="utf-8")
 
 
 def _available_marker_values(recording: GazeRecording) -> list[str]:

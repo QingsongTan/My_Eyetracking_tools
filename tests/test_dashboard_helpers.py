@@ -5,13 +5,18 @@ from io import BytesIO
 import pandas as pd
 import pytest
 from PIL import Image
+from streamlit.elements import image as st_image
+from streamlit.elements.lib import image_utils
 
 from gaze_toolkit.dashboard import (
     DashboardControls,
+    _build_canvas_initial_drawing,
     _build_segment_views,
+    _ensure_streamlit_drawable_canvas_compatibility,
     _load_canvas_background_image,
     _parse_canvas_rectangles_to_aois,
     _parse_time_ranges,
+    _should_restore_canvas_draft,
 )
 from gaze_toolkit.datasets import simulate_gaze_recording
 
@@ -60,6 +65,63 @@ def test_load_canvas_background_image_supports_file_like_object() -> None:
     assert loaded is not None
     assert loaded.size == (12, 8)
     assert loaded.mode == "RGBA"
+
+
+def test_ensure_streamlit_drawable_canvas_compatibility_patches_legacy_image_to_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+    original_image_to_url = getattr(st_image, "image_to_url", None)
+
+    def fake_image_to_url(
+        image: object,
+        *,
+        layout_config: object,
+        clamp: bool,
+        channels: str,
+        output_format: str,
+        image_id: str,
+    ) -> str:
+        captured["image"] = image
+        captured["layout_width"] = getattr(layout_config, "width", None)
+        captured["clamp"] = clamp
+        captured["channels"] = channels
+        captured["output_format"] = output_format
+        captured["image_id"] = image_id
+        return "/media/test-image"
+
+    monkeypatch.delattr(st_image, "image_to_url", raising=False)
+    monkeypatch.setattr(image_utils, "image_to_url", fake_image_to_url)
+
+    _ensure_streamlit_drawable_canvas_compatibility()
+
+    assert hasattr(st_image, "image_to_url")
+    assert st_image.image_to_url("img", 640, True, "RGB", "PNG", "canvas-bg") == "/media/test-image"
+    assert captured == {
+        "image": "img",
+        "layout_width": 640,
+        "clamp": True,
+        "channels": "RGB",
+        "output_format": "PNG",
+        "image_id": "canvas-bg",
+    }
+
+    if original_image_to_url is None:
+        monkeypatch.delattr(st_image, "image_to_url", raising=False)
+    else:
+        monkeypatch.setattr(st_image, "image_to_url", original_image_to_url)
+
+
+def test_should_restore_canvas_draft_only_when_entering_canvas_mode() -> None:
+    assert not _should_restore_canvas_draft(previous_mode=None, current_mode="手动输入")
+    assert _should_restore_canvas_draft(previous_mode="手动输入", current_mode="鼠标绘制")
+    assert not _should_restore_canvas_draft(previous_mode="鼠标绘制", current_mode="鼠标绘制")
+
+
+def test_build_canvas_initial_drawing_avoids_live_feedback_loop() -> None:
+    draft = {"objects": [{"type": "rect"}]}
+
+    assert _build_canvas_initial_drawing(draft, restore_draft=False) is None
+    assert _build_canvas_initial_drawing(None, restore_draft=True) is None
+    assert _build_canvas_initial_drawing(draft, restore_draft=True) == draft
 
 
 def test_parse_canvas_rectangles_to_aois_scales_coordinates() -> None:

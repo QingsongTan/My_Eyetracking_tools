@@ -75,7 +75,42 @@ from gaze_toolkit.visualization import (
     plot_signal_overview,
 )
 
+
+def _ensure_streamlit_drawable_canvas_compatibility() -> None:
+    """Patch Streamlit image helpers so streamlit-drawable-canvas works on newer releases."""
+    try:
+        from streamlit.elements import image as st_image
+
+        if hasattr(st_image, "image_to_url"):
+            return
+
+        from streamlit.elements.lib.image_utils import image_to_url as streamlit_image_to_url
+        from streamlit.elements.lib.layout_utils import LayoutConfig
+
+        def _legacy_image_to_url(
+            image: Any,
+            width: int | str | None,
+            clamp: bool,
+            channels: str,
+            output_format: str,
+            image_id: str,
+        ) -> str:
+            return streamlit_image_to_url(
+                image,
+                layout_config=LayoutConfig(width=width),
+                clamp=clamp,
+                channels=channels,
+                output_format=output_format,
+                image_id=image_id,
+            )
+
+        st_image.image_to_url = _legacy_image_to_url
+    except Exception:
+        return
+
+
 try:
+    _ensure_streamlit_drawable_canvas_compatibility()
     from streamlit_drawable_canvas import st_canvas
 
     _HAS_AOI_CANVAS = True
@@ -141,6 +176,8 @@ IMAGE_ATTENTION_MODEL_LABELS = {
 }
 AOI_STATE_KEY = "dashboard_aois"
 AOI_CANVAS_DRAFT_KEY = "dashboard_aoi_canvas"
+AOI_CANVAS_MODE_KEY = "dashboard_aoi_canvas_mode"
+AOI_CANVAS_RESTORE_KEY = "dashboard_aoi_canvas_restore"
 AOI_SCANPATH_KEY = "single-session-aoi-scanpath"
 AOI_TRANSITION_KEY = "single-session-aoi-transition"
 DASHBOARD_ACTIVE_TAB_KEY = "dashboard_active_tab"
@@ -966,6 +1003,7 @@ def _render_stimulus_attention_section(
                         "需要可用的独立 DeepGaze Python 运行时。",
                         "默认查找：项目根目录下 `.deepgaze-py312/Scripts/python.exe`。",
                         "也可以通过环境变量 `GAZE_TOOLKIT_DEEPGAZE_PYTHON` 指定解释器。",
+                        "如运行时目录已损坏，可执行 `powershell -File scripts/setup-deepgaze-runtime.ps1 -ForceRecreate` 重建。",
                     ]
                 )
             )
@@ -992,6 +1030,10 @@ def _render_aoi_section(
             st.session_state[AOI_STATE_KEY] = []
         if AOI_CANVAS_DRAFT_KEY not in st.session_state:
             st.session_state[AOI_CANVAS_DRAFT_KEY] = None
+        if AOI_CANVAS_MODE_KEY not in st.session_state:
+            st.session_state[AOI_CANVAS_MODE_KEY] = None
+        if AOI_CANVAS_RESTORE_KEY not in st.session_state:
+            st.session_state[AOI_CANVAS_RESTORE_KEY] = False
 
         left, right = st.columns([1.05, 1.35], gap="large")
 
@@ -1000,6 +1042,10 @@ def _render_aoi_section(
             st.caption("AOI 分析基于 fixation_table() 的注视中心，不直接操作原始 samples。")
 
             mode = st.radio("AOI 定义方式", options=["手动输入", "鼠标绘制"], key="aoi-mode", horizontal=True)
+            previous_mode = st.session_state.get(AOI_CANVAS_MODE_KEY)
+            if _should_restore_canvas_draft(previous_mode=previous_mode, current_mode=mode):
+                st.session_state[AOI_CANVAS_RESTORE_KEY] = True
+            st.session_state[AOI_CANVAS_MODE_KEY] = mode
             if mode == "手动输入":
                 name = st.text_input(
                     "AOI 名称",
@@ -1115,6 +1161,7 @@ def _render_canvas_aoi_builder(
 
     canvas_width, canvas_height = _aoi_canvas_dimensions(screen_size)
     canvas_background = _load_canvas_background_image(stimulus_image)
+    restore_draft = bool(st.session_state.get(AOI_CANVAS_RESTORE_KEY))
     canvas_result = st_canvas(
         fill_color="rgba(0, 243, 255, 0.14)",
         stroke_width=2,
@@ -1126,9 +1173,14 @@ def _render_canvas_aoi_builder(
         drawing_mode="rect",
         display_toolbar=True,
         update_streamlit=True,
-        initial_drawing=st.session_state.get(AOI_CANVAS_DRAFT_KEY),
+        initial_drawing=_build_canvas_initial_drawing(
+            st.session_state.get(AOI_CANVAS_DRAFT_KEY),
+            restore_draft=restore_draft,
+        ),
         key="aoi-canvas-v1",
     )
+    if restore_draft:
+        st.session_state[AOI_CANVAS_RESTORE_KEY] = False
     current_canvas_json = canvas_result.json_data if canvas_result is not None else None
     if current_canvas_json is not None:
         st.session_state[AOI_CANVAS_DRAFT_KEY] = current_canvas_json
@@ -1145,6 +1197,20 @@ def _render_canvas_aoi_builder(
             st.warning("请先绘制至少一个矩形 AOI。")
         else:
             st.session_state[AOI_STATE_KEY] = aois
+
+
+def _should_restore_canvas_draft(*, previous_mode: str | None, current_mode: str) -> bool:
+    return current_mode == "鼠标绘制" and previous_mode != current_mode
+
+
+def _build_canvas_initial_drawing(
+    draft: dict[str, Any] | None,
+    *,
+    restore_draft: bool,
+) -> dict[str, Any] | None:
+    if not restore_draft or not isinstance(draft, dict):
+        return None
+    return draft
 
 
 def _render_aoi_name_editor(aois: list[AOI]) -> None:

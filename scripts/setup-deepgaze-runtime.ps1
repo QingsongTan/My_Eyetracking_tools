@@ -146,6 +146,8 @@ raise SystemExit(0 if version == '$ExpectedVersion' else 2)
 $repoRoot = Get-RepoRoot
 $venvRoot = Get-AbsolutePath -BasePath $repoRoot -CandidatePath $VenvPath
 $requirementsPath = Join-Path $repoRoot "configs\deepgaze-runtime-requirements.txt"
+$deepgazeArchiveUrl = "https://github.com/matthias-k/DeepGaze/archive/c87b106e8698497c59998b469c45770e993baca3.zip"
+$deepgazeRequirement = "deepgaze_pytorch @ $deepgazeArchiveUrl"
 
 Push-Location $repoRoot
 try {
@@ -187,6 +189,9 @@ try {
 
     Write-Step "Installing pinned DeepGaze runtime dependencies"
     Invoke-Step -PythonExe $venvPython -Arguments @("-m", "pip", "install", "-r", $requirementsPath)
+
+    Write-Step "Installing pinned DeepGaze package from GitHub archive"
+    Invoke-Step -PythonExe $venvPython -Arguments @("-m", "pip", "install", "--no-deps", $deepgazeRequirement)
 
     if (Test-PackageVersion -PythonExe $venvPython -PackageName "clip" -ExpectedVersion "1.0") {
         Write-Step "CLIP 1.0 is already installed."

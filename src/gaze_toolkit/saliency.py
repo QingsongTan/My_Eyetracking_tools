@@ -16,6 +16,8 @@ from gaze_toolkit.types import GazeRecording
 
 FAST_SALIENCY_BACKEND = "opencv_fast"
 COGNITIVE_SALIENCY_BACKEND = "deepgaze"
+DEEPGAZE_RUNTIME_DIRNAME = ".deepgaze-py312"
+DEEPGAZE_RUNTIME_REBUILD_HINT = "Re-run scripts/setup-deepgaze-runtime.ps1 -ForceRecreate."
 
 
 @dataclass(frozen=True)
@@ -50,10 +52,7 @@ def list_saliency_backends(project_root: str | Path | None = None) -> dict[str, 
     deepgaze_detail = (
         f"DeepGaze subprocess runtime detected at {deepgaze_python}."
         if deepgaze_available
-        else (
-            "DeepGaze backend is implemented through a separate Python runtime. "
-            "Set GAZE_TOOLKIT_DEEPGAZE_PYTHON or create .deepgaze-py312/Scripts/python.exe."
-        )
+        else _describe_missing_deepgaze_runtime(project_root=project_root)
     )
 
     return {
@@ -342,7 +341,7 @@ def _resolve_deepgaze_python(
 
     candidates.extend(
         [
-            project_root_path / ".deepgaze-py312" / "Scripts" / "python.exe",
+            project_root_path / DEEPGAZE_RUNTIME_DIRNAME / "Scripts" / "python.exe",
             project_root_path / ".venv-deepgaze" / "Scripts" / "python.exe",
             project_root_path / ".venv-deepgaze312" / "Scripts" / "python.exe",
         ]
@@ -361,11 +360,34 @@ def _require_deepgaze_python(
 ) -> Path:
     python_path = _resolve_deepgaze_python(project_root=project_root, runtime_python=runtime_python)
     if python_path is None:
-        raise RuntimeError(
-            "DeepGaze runtime was not found. Set GAZE_TOOLKIT_DEEPGAZE_PYTHON or create "
-            ".deepgaze-py312/Scripts/python.exe under the project root."
-        )
+        raise RuntimeError(_describe_missing_deepgaze_runtime(project_root=project_root))
     return python_path
+
+
+def _describe_missing_deepgaze_runtime(*, project_root: str | Path | None = None) -> str:
+    project_root_path = _resolve_project_root(project_root)
+    env_value = os.getenv("GAZE_TOOLKIT_DEEPGAZE_PYTHON")
+    if env_value:
+        env_path = Path(env_value)
+        if not env_path.exists():
+            return (
+                f"GAZE_TOOLKIT_DEEPGAZE_PYTHON points to {env_path}, but that file does not exist. "
+                f"{DEEPGAZE_RUNTIME_REBUILD_HINT}"
+            )
+
+    runtime_root = project_root_path / DEEPGAZE_RUNTIME_DIRNAME
+    runtime_python = runtime_root / "Scripts" / "python.exe"
+    if runtime_root.exists() and not runtime_python.exists():
+        return (
+            f"DeepGaze runtime folder exists at {runtime_root}, but {runtime_python.name} is missing. "
+            f"The runtime looks incomplete. {DEEPGAZE_RUNTIME_REBUILD_HINT}"
+        )
+
+    return (
+        "DeepGaze runtime was not found. Set GAZE_TOOLKIT_DEEPGAZE_PYTHON or create "
+        f"{DEEPGAZE_RUNTIME_DIRNAME}/Scripts/python.exe under the project root. "
+        f"{DEEPGAZE_RUNTIME_REBUILD_HINT}"
+    )
 
 
 def _extract_fixation_payload(recording: GazeRecording | None) -> dict[str, Any]:

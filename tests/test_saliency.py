@@ -96,6 +96,23 @@ def test_probe_deepgaze_runtime_surfaces_subprocess_failure(monkeypatch, tmp_pat
     assert payload["error"] == "torch import failed"
 
 
+def test_list_saliency_backends_reports_incomplete_runtime_folder(tmp_path) -> None:
+    (tmp_path / ".deepgaze-py312" / "Lib").mkdir(parents=True)
+
+    status = list_saliency_backends(project_root=tmp_path)[COGNITIVE_SALIENCY_BACKEND]
+
+    assert status.available is False
+    assert "looks incomplete" in status.detail
+    assert "setup-deepgaze-runtime.ps1 -ForceRecreate" in status.detail
+
+
+def test_require_deepgaze_python_reports_incomplete_runtime_folder(tmp_path) -> None:
+    (tmp_path / ".deepgaze-py312" / "Lib").mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="looks incomplete"):
+        saliency_module._require_deepgaze_python(project_root=tmp_path)
+
+
 def test_predict_image_attention_cognitive_backend_uses_worker_bridge(monkeypatch, tmp_path) -> None:
     image = np.zeros((32, 48, 3), dtype=np.uint8)
     image[8:24, 12:28] = 255

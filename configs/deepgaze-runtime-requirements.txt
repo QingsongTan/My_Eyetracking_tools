@@ -2,7 +2,8 @@
 torch==2.9.1+cpu
 torchvision==0.24.1+cpu
 torchaudio==2.9.1+cpu
-deepgaze-pytorch==1.2.1
+# deepgaze_pytorch is installed separately from a pinned GitHub archive
+# in scripts/setup-deepgaze-runtime.ps1 to avoid unresolved PyPI package names.
 pysaliency==0.2.22
 scipy==1.17.1
 einops==0.8.2

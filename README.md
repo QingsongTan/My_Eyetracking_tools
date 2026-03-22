@@ -82,6 +82,18 @@ pip install -e .
 pip install -e .[dashboard]
 ```
 
+如果你要启用基于 PyTorch + PySaliency + DeepGaze 的认知显著性后端，推荐直接运行仓库内的一键脚本：
+
+```powershell
+scripts\setup-deepgaze-runtime.cmd
+```
+
+如果你希望安装后顺手把完整 DeepGaze 推理链路也验掉，可以加上：
+
+```powershell
+scripts\setup-deepgaze-runtime.cmd -RunFullValidation
+```
+
 命令行演示：
 
 ```bash

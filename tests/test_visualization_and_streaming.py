@@ -174,6 +174,28 @@ def test_visualizations_support_light_theme() -> None:
     plt.close(signal_figure)
 
 
+def test_interactive_visualizations_accept_palette_and_opacity_overrides() -> None:
+    recording = analyze_recording(simulate_gaze_recording(seed=44)).enriched_recording
+
+    default_scanpath = plot_interactive_scanpath(recording)
+    custom_scanpath = plot_interactive_scanpath(
+        recording,
+        palette="sunset",
+        fixation_opacity=0.55,
+    )
+    assert custom_scanpath.data[-1].marker.opacity == 0.55
+    assert tuple(custom_scanpath.data[-1].marker.colorscale) != tuple(default_scanpath.data[-1].marker.colorscale)
+
+    default_heatmap = plot_interactive_heatmap(recording)
+    custom_heatmap = plot_interactive_heatmap(
+        recording,
+        palette="violet",
+        heatmap_opacity=0.48,
+    )
+    assert custom_heatmap.data[0].opacity == 0.48
+    assert tuple(custom_heatmap.data[0].colorscale) != tuple(default_heatmap.data[0].colorscale)
+
+
 def test_sliding_window_predictor_emits_prediction() -> None:
     dataset = simulate_intent_dataset(num_sessions=16, random_state=4)
     result = train_model(dataset, target="intent_label")

@@ -20,11 +20,19 @@ from gaze_toolkit.analysis import (
 from gaze_toolkit.datasets import simulate_gaze_recording
 from gaze_toolkit.events import has_labeled_events
 from gaze_toolkit.io import from_frame
+from gaze_toolkit.saliency import (
+    COGNITIVE_SALIENCY_BACKEND,
+    FAST_SALIENCY_BACKEND,
+    get_saliency_backend_status,
+    probe_deepgaze_runtime,
+    predict_image_attention,
+)
 from gaze_toolkit.segmentation import segment_recording
 from gaze_toolkit.types import GazeRecording
 from gaze_toolkit.visualization import (
     plot_confusion,
     plot_feature_importance,
+    plot_image_saliency_heatmap,
     plot_interactive_heatmap,
     plot_interactive_scanpath,
     plot_metrics,
@@ -69,6 +77,24 @@ SCREEN_RESOLUTION_PRESETS: dict[str, tuple[int, int] | None] = {
     "自定义": None,
 }
 DEFAULT_SCREEN_SIZE = (1920, 1080)
+SCANPATH_PALETTE_OPTIONS = {
+    "主题默认": "theme_default",
+    "极光蓝青": "aurora",
+    "冰川蓝": "glacier",
+    "霓虹紫": "violet",
+    "落日橙": "sunset",
+}
+HEATMAP_PALETTE_OPTIONS = {
+    "主题默认": "theme_default",
+    "极光蓝青": "aurora",
+    "冰川蓝": "glacier",
+    "霓虹紫": "violet",
+    "落日橙": "sunset",
+}
+IMAGE_ATTENTION_MODEL_LABELS = {
+    FAST_SALIENCY_BACKEND: "OpenCV Fast Saliency",
+    COGNITIVE_SALIENCY_BACKEND: "PyTorch + PySaliency + DeepGaze",
+}
 
 
 @dataclass
@@ -94,6 +120,16 @@ class SegmentView:
     marker_value: str = ""
     start_marker: str = ""
     end_marker: str = ""
+
+
+@dataclass
+class VisualControls:
+    """Visual customization options for linked charts."""
+
+    scanpath_palette: str
+    heatmap_palette: str
+    fixation_opacity: float
+    heatmap_opacity: float
 
 
 def main() -> None:
@@ -130,6 +166,7 @@ def main() -> None:
 
     recording, stimulus_image, screen_size = _build_recording_from_sidebar()
     controls = _build_analysis_controls(recording)
+    visual_controls = _build_visual_controls()
 
     try:
         full_analysis = analyze_recording(
@@ -166,6 +203,7 @@ def main() -> None:
             stimulus_image=stimulus_image,
             screen_size=screen_size,
             theme_name=theme_name,
+            visual_controls=visual_controls,
         )
 
     with tabs[2]:
@@ -334,6 +372,21 @@ def _build_analysis_controls(recording: GazeRecording) -> DashboardControls:
     )
 
 
+def _build_visual_controls() -> VisualControls:
+    st.sidebar.header("可视化样式")
+    scanpath_palette_label = st.sidebar.selectbox("Scanpath 色系", options=list(SCANPATH_PALETTE_OPTIONS), index=0)
+    heatmap_palette_label = st.sidebar.selectbox("Heatmap 色系", options=list(HEATMAP_PALETTE_OPTIONS), index=0)
+    fixation_opacity = float(st.sidebar.slider("注视层透明度", min_value=0.20, max_value=0.95, value=0.72, step=0.05))
+    heatmap_opacity = float(st.sidebar.slider("热图透明度", min_value=0.20, max_value=0.95, value=0.60, step=0.05))
+    st.sidebar.caption("注视节点和热图默认半透明，叠加刺激图时不会完全遮住背景。")
+    return VisualControls(
+        scanpath_palette=SCANPATH_PALETTE_OPTIONS[scanpath_palette_label],
+        heatmap_palette=HEATMAP_PALETTE_OPTIONS[heatmap_palette_label],
+        fixation_opacity=fixation_opacity,
+        heatmap_opacity=heatmap_opacity,
+    )
+
+
 def _build_segmentation_controls(
     recording: GazeRecording,
 ) -> tuple[dict[str, Any] | None, str, str | None]:
@@ -496,6 +549,7 @@ def _render_single_session(
     stimulus_image: str | Path | None = None,
     screen_size: tuple[int, int] = DEFAULT_SCREEN_SIZE,
     theme_name: str = "dark",
+    visual_controls: VisualControls | None = None,
 ) -> None:
     st.subheader("单次会话分析链路")
     st.caption("输入数据 -> 预处理 -> 事件识别 -> 分段选择 -> Scanpath / Heatmap / 特征解释")
@@ -529,6 +583,13 @@ def _render_single_session(
     focus_cols[2].metric("当前注视数", int(display_metrics["fixation_count"]))
     focus_cols[3].metric("当前眨眼数", int(display_metrics["blink_count"]))
 
+    visual_controls = visual_controls or VisualControls(
+        scanpath_palette="theme_default",
+        heatmap_palette="theme_default",
+        fixation_opacity=0.72,
+        heatmap_opacity=0.60,
+    )
+
     left, right = st.columns(2, gap="large")
     with left:
         st.markdown("### 扫描路径轨迹 (Scanpath)")
@@ -539,6 +600,8 @@ def _render_single_session(
                 background_image=stimulus_image,
                 screen_size=screen_size,
                 theme_name=theme_name,
+                palette=visual_controls.scanpath_palette,
+                fixation_opacity=visual_controls.fixation_opacity,
             ),
             key="single-session-scanpath",
             width="stretch",
@@ -554,6 +617,8 @@ def _render_single_session(
                 background_image=stimulus_image,
                 screen_size=screen_size,
                 theme_name=theme_name,
+                palette=visual_controls.heatmap_palette,
+                heatmap_opacity=visual_controls.heatmap_opacity,
             ),
             key="single-session-heatmap",
             width="stretch",
@@ -595,6 +660,15 @@ def _render_single_session(
             )
         _render_panel_table(event_table.head(24), max_height_px=360)
 
+    if stimulus_image is not None:
+        _render_stimulus_attention_section(
+            stimulus_image=stimulus_image,
+            recording=display_analysis.enriched_recording,
+            screen_size=screen_size,
+            theme_name=theme_name,
+            visual_controls=visual_controls,
+        )
+
     st.markdown("**当前展示对象关键特征**")
     top_features = (
         pd.Series(display_analysis.features, name="数值")
@@ -614,6 +688,119 @@ def _render_single_session(
     else:
         st.caption("切换上方“当前展示分段”后，scanpath、heatmap、信号总览和事件表都会同步刷新。")
         _render_panel_table(_format_segment_table(segment_table), hide_index=True, max_height_px=300)
+
+
+def _render_stimulus_attention_section(
+    stimulus_image: str | Path | Any,
+    *,
+    recording: GazeRecording,
+    screen_size: tuple[int, int],
+    theme_name: str,
+    visual_controls: VisualControls,
+) -> None:
+    st.markdown("**基于图片内容的先验注意分布**")
+    st.caption("这部分不依赖上传的眼动轨迹，只根据图片自身的颜色对比、局部反差和边缘结构，快速估计底层视觉显著性。")
+
+    try:
+        result = predict_image_attention(stimulus_image, backend=FAST_SALIENCY_BACKEND)
+    except (ImportError, TypeError, ValueError) as exc:
+        st.warning(f"图片显著性生成失败：{exc}")
+        return
+
+    fast_status = get_saliency_backend_status(FAST_SALIENCY_BACKEND)
+    future_status = get_saliency_backend_status(COGNITIVE_SALIENCY_BACKEND)
+    runtime_ok = False
+    runtime_payload: dict[str, Any] = {}
+    try:
+        runtime_ok, runtime_payload = probe_deepgaze_runtime()
+    except RuntimeError as exc:
+        runtime_payload = {"ok": False, "error": str(exc)}
+    attention_center = (
+        f"({result.metadata['attention_center_x']:.0f}, {result.metadata['attention_center_y']:.0f})"
+    )
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("当前模型", IMAGE_ATTENTION_MODEL_LABELS[result.backend])
+    metric_cols[1].metric("输入分辨率", f"{result.width} x {result.height}")
+    metric_cols[2].metric("高显著区域", f"{result.metadata['hotspot_ratio'] * 100:.1f}%")
+    metric_cols[3].metric("注意质心", attention_center)
+    st.caption(
+        f"{fast_status.detail} 推理耗时约 {result.metadata['inference_ms']:.1f} ms，"
+        f"峰值显著性 {result.metadata['peak_saliency']:.2f}。"
+    )
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        st.markdown("### 图片快速显著性热力图")
+        st.caption("适合在没有真实眼动数据时，先用作刺激图的快速注意先验。")
+        st.plotly_chart(
+            plot_image_saliency_heatmap(
+                result.saliency_map,
+                background_image=stimulus_image,
+                screen_size=screen_size,
+                theme_name=theme_name,
+                palette=visual_controls.heatmap_palette,
+                heatmap_opacity=visual_controls.heatmap_opacity,
+            ),
+            key="stimulus-fast-saliency",
+            width="stretch",
+            config={"displaylogo": False},
+        )
+
+    with right:
+        st.markdown("### 认知模型热力图 (DeepGaze)")
+        st.caption("有真实注视历史时优先使用 DeepGazeIII；没有 fixation history 时会回退到 DeepGazeIIE。")
+        if runtime_ok:
+            try:
+                cognitive = predict_image_attention(
+                    stimulus_image,
+                    backend=COGNITIVE_SALIENCY_BACKEND,
+                    recording=recording,
+                )
+            except RuntimeError as exc:
+                st.warning(f"DeepGaze 推理失败：{exc}")
+                st.info(future_status.detail)
+            else:
+                st.plotly_chart(
+                    plot_image_saliency_heatmap(
+                        cognitive.saliency_map,
+                        background_image=stimulus_image,
+                        screen_size=screen_size,
+                        theme_name=theme_name,
+                        palette=visual_controls.heatmap_palette,
+                        heatmap_opacity=visual_controls.heatmap_opacity,
+                        title="认知模型注意热力图 (DeepGaze)",
+                    ),
+                    key="stimulus-cognitive-saliency",
+                    width="stretch",
+                    config={"displaylogo": False},
+                )
+                details = []
+                model_name = cognitive.metadata.get("deepgaze_model")
+                if model_name:
+                    details.append(f"模型：{model_name}")
+                if "conditioning_fixation_count" in cognitive.metadata:
+                    details.append(f"条件 fixation 数：{int(cognitive.metadata['conditioning_fixation_count'])}")
+                if "nss_mean" in cognitive.metadata:
+                    details.append(f"NSS：{cognitive.metadata['nss_mean']:.3f}")
+                if "sim" in cognitive.metadata:
+                    details.append(f"SIM：{cognitive.metadata['sim']:.3f}")
+                if "kl_divergence" in cognitive.metadata:
+                    details.append(f"KL：{cognitive.metadata['kl_divergence']:.3f}")
+                if details:
+                    st.caption(" | ".join(details))
+        else:
+            st.warning(runtime_payload.get("error", future_status.detail))
+            st.info(
+                "\n".join(
+                    [
+                        f"backend 名称：`{COGNITIVE_SALIENCY_BACKEND}`",
+                        "需要可用的独立 DeepGaze Python 运行时。",
+                        "默认查找：项目根目录下 `.deepgaze-py312/Scripts/python.exe`。",
+                        "也可以通过环境变量 `GAZE_TOOLKIT_DEEPGAZE_PYTHON` 指定解释器。",
+                    ]
+                )
+            )
 
 
 def _render_segment_selector(segment_views: list[SegmentView]) -> SegmentView | None:
@@ -1465,6 +1652,41 @@ def _inject_styles(theme_name: str = "dark") -> None:
           }}
           .hero h1 {{
             font-size: 2.95rem;
+          }}
+        }}
+        @media (min-width: 961px) {{
+          html, body, .stApp {{
+            height: 100%;
+            overflow: hidden;
+          }}
+          [data-testid="stAppViewContainer"] {{
+            height: 100vh !important;
+            min-height: 100vh !important;
+            overflow: hidden !important;
+            align-items: stretch;
+          }}
+          [data-testid="stSidebar"] {{
+            height: 100vh !important;
+            max-height: 100vh !important;
+            overflow: hidden !important;
+          }}
+          [data-testid="stSidebar"] > div,
+          [data-testid="stSidebarContent"] {{
+            height: 100vh !important;
+            max-height: 100vh !important;
+            overflow-y: auto !important;
+            overflow-x: hidden !important;
+            overscroll-behavior: contain;
+          }}
+          [data-testid="stMain"] {{
+            height: 100vh !important;
+            max-height: 100vh !important;
+            overflow-y: auto !important;
+            overflow-x: hidden !important;
+            overscroll-behavior: contain;
+          }}
+          .block-container {{
+            min-height: auto;
           }}
         }}
         @media (max-width: 760px) {{

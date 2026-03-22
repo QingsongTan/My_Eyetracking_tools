@@ -50,3 +50,28 @@ def test_dashboard_can_switch_to_light_theme() -> None:
 
     assert not app.exception
     assert any("#f9fdff" in getattr(markdown, "value", "") for markdown in app.markdown)
+
+
+def test_dashboard_exposes_visual_style_controls() -> None:
+    app = _load_dashboard()
+
+    labels = {box.label for box in app.selectbox}
+    slider_labels = {slider.label for slider in app.slider}
+
+    assert "Scanpath 色系" in labels
+    assert "Heatmap 色系" in labels
+    assert "注视层透明度" in slider_labels
+    assert "热图透明度" in slider_labels
+
+
+def test_dashboard_injects_desktop_split_scroll_layout() -> None:
+    app = _load_dashboard()
+
+    style_blocks = [getattr(markdown, "value", "") for markdown in app.markdown if "<style>" in getattr(markdown, "value", "")]
+    combined_styles = "\n".join(style_blocks)
+
+    assert '@media (min-width: 961px)' in combined_styles
+    assert '[data-testid="stSidebarContent"]' in combined_styles
+    assert '[data-testid="stMain"]' in combined_styles
+    assert 'overflow-y: auto !important;' in combined_styles
+    assert 'overflow: hidden !important;' in combined_styles

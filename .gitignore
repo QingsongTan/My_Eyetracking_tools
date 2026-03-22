@@ -6,6 +6,9 @@ dist/
 build/
 *.egg-info/
 .venv/
+.deepgaze-py312/
+.venv-deepgaze/
+.venv-deepgaze312/
 .ipynb_checkpoints/
 
 .gstack/

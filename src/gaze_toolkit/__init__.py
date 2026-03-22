@@ -25,6 +25,16 @@ from gaze_toolkit.modeling import (
 from gaze_toolkit.multimodal import MultiModalData, late_fusion
 from gaze_toolkit.pipeline import build_feature_dataset, run_pipeline, run_segmented_pipeline
 from gaze_toolkit.preprocess import handle_missing_samples, preprocess
+from gaze_toolkit.saliency import (
+    COGNITIVE_SALIENCY_BACKEND,
+    FAST_SALIENCY_BACKEND,
+    ImageSaliencyResult,
+    SaliencyBackendStatus,
+    get_saliency_backend_status,
+    list_saliency_backends,
+    probe_deepgaze_runtime,
+    predict_image_attention,
+)
 from gaze_toolkit.segmentation import (
     RecordingSegment,
     build_segment_feature_table,
@@ -63,11 +73,14 @@ __all__ = [
     "late_fusion",
     "load",
     "load_config",
+    "list_saliency_backends",
     "permutation_feature_importance",
     "plot_heatmap",
     "plot_scanpath",
     "preprocess",
     "predict",
+    "predict_image_attention",
+    "probe_deepgaze_runtime",
     "register_feature",
     "register_loader",
     "register_model",
@@ -78,6 +91,11 @@ __all__ = [
     "segment_by_marker_windows",
     "segment_by_time_ranges",
     "segment_recording",
+    "get_saliency_backend_status",
     "train_model",
     "write_complete_example_csv",
+    "COGNITIVE_SALIENCY_BACKEND",
+    "FAST_SALIENCY_BACKEND",
+    "ImageSaliencyResult",
+    "SaliencyBackendStatus",
 ]

@@ -104,9 +104,79 @@ LIGHT_VISUAL_THEME: dict[str, Any] = {
     "feature_bar": "#00bfe8",
 }
 
+SCANPATH_COLOR_PRESETS: dict[str, list[list[Any]]] = {
+    "aurora": [
+        [0.0, "#173d7a"],
+        [0.35, "#00c2ff"],
+        [0.7, "#00f0b5"],
+        [1.0, "#e8fff9"],
+    ],
+    "glacier": [
+        [0.0, "#dceeff"],
+        [0.3, "#7cc7ff"],
+        [0.7, "#3af1ff"],
+        [1.0, "#0c355d"],
+    ],
+    "sunset": [
+        [0.0, "#53264d"],
+        [0.32, "#ff7b54"],
+        [0.68, "#ffb74d"],
+        [1.0, "#fff0d6"],
+    ],
+    "violet": [
+        [0.0, "#251554"],
+        [0.34, "#7446ff"],
+        [0.7, "#ff5edb"],
+        [1.0, "#ffe6fb"],
+    ],
+}
+
+HEATMAP_COLOR_PRESETS: dict[str, list[list[Any]]] = {
+    "aurora": [
+        [0.00, "rgba(8,23,45,0.00)"],
+        [0.18, "#123d7a"],
+        [0.44, "#00b8ff"],
+        [0.72, "#00f2c3"],
+        [1.00, "#f4fff9"],
+    ],
+    "glacier": [
+        [0.00, "rgba(247,251,255,0.00)"],
+        [0.18, "#dceeff"],
+        [0.44, "#89cbff"],
+        [0.72, "#30e9ff"],
+        [1.00, "#0d365d"],
+    ],
+    "sunset": [
+        [0.00, "rgba(44,20,35,0.00)"],
+        [0.18, "#5b2c51"],
+        [0.44, "#ff7b54"],
+        [0.72, "#ffb74d"],
+        [1.00, "#fff1d7"],
+    ],
+    "violet": [
+        [0.00, "rgba(24,12,54,0.00)"],
+        [0.18, "#2c1766"],
+        [0.44, "#7446ff"],
+        [0.72, "#ff5edb"],
+        [1.00, "#ffe9fd"],
+    ],
+}
+
 
 def _visual_theme(theme_name: str = "dark") -> dict[str, Any]:
     return LIGHT_VISUAL_THEME if theme_name == "light" else DARK_VISUAL_THEME
+
+
+def _resolve_scanpath_colorscale(theme_name: str, palette: str) -> list[list[Any]]:
+    if palette == "theme_default":
+        return _visual_theme(theme_name)["scanpath_colorscale"]
+    return SCANPATH_COLOR_PRESETS.get(palette, _visual_theme(theme_name)["scanpath_colorscale"])
+
+
+def _resolve_heatmap_colorscale(theme_name: str, palette: str) -> list[list[Any]]:
+    if palette == "theme_default":
+        return _visual_theme(theme_name)["heatmap_colorscale"]
+    return HEATMAP_COLOR_PRESETS.get(palette, _visual_theme(theme_name)["heatmap_colorscale"])
 
 
 def _apply_matplotlib_panel_style(
@@ -214,9 +284,14 @@ def plot_interactive_scanpath(
     screen_size: tuple[int, int] | None = None,
     figure_height: int = 420,
     theme_name: str = "dark",
+    palette: str = "theme_default",
+    fixation_opacity: float = 0.72,
 ) -> go.Figure:
     """Plot a fixation-centered interactive scanpath."""
     theme = _visual_theme(theme_name)
+    scanpath_colorscale = _resolve_scanpath_colorscale(theme_name, palette)
+    fixation_opacity = float(np.clip(fixation_opacity, 0.15, 1.0))
+    line_opacity = float(np.clip(fixation_opacity * 0.8, 0.18, 0.92))
     valid_frame = _valid_frame(recording)
     fixations = _fixation_frame(recording)
     figure = go.Figure()
@@ -260,7 +335,7 @@ def plot_interactive_scanpath(
             x=fixations["x"],
             y=fixations["y"],
             mode="lines",
-            line={"color": theme["panel_line"], "width": 2},
+            line={"color": _with_alpha(theme["panel_line"], line_opacity), "width": 2},
             hoverinfo="skip",
             showlegend=False,
         )
@@ -277,7 +352,7 @@ def plot_interactive_scanpath(
             marker={
                 "size": fixations["marker_size"],
                 "color": fixations["progress"],
-                "colorscale": theme["scanpath_colorscale"],
+                "colorscale": scanpath_colorscale,
                 "cmin": 0.0,
                 "cmax": 1.0,
                 "showscale": True,
@@ -288,7 +363,7 @@ def plot_interactive_scanpath(
                     "thickness": 18,
                 },
                 "line": {"color": theme["marker_line"], "width": 1.2},
-                "opacity": 0.95,
+                "opacity": fixation_opacity,
             },
             customdata=fixations[["duration_ms", "start_time_ms", "end_time_ms"]],
             hovertemplate=(
@@ -338,9 +413,13 @@ def plot_interactive_heatmap(
     bins: int = 140,
     figure_height: int = 420,
     theme_name: str = "dark",
+    palette: str = "theme_default",
+    heatmap_opacity: float = 0.62,
 ) -> go.Figure:
     """Plot a smoothed density heatmap with a dark interactive style."""
     theme = _visual_theme(theme_name)
+    heatmap_colorscale = _resolve_heatmap_colorscale(theme_name, palette)
+    heatmap_opacity = float(np.clip(heatmap_opacity, 0.15, 1.0))
     frame = _valid_frame(recording)
     figure = go.Figure()
     background = _load_background_image(background_image)
@@ -419,11 +498,11 @@ def plot_interactive_heatmap(
             x=x_centers,
             y=y_centers,
             z=density,
-            colorscale=theme["heatmap_colorscale"],
+            colorscale=heatmap_colorscale,
             zmin=0.0,
             zmax=zmax,
             zsmooth="best",
-            opacity=0.88 if background is not None else 1.0,
+            opacity=heatmap_opacity,
             hovertemplate="Screen X=%{x:.0f}<br>Screen Y=%{y:.0f}<br>密度=%{z:.3f}<extra></extra>",
             showscale=False,
         )
@@ -433,6 +512,107 @@ def plot_interactive_heatmap(
 
     figure.update_layout(
         title="注意力核密度热力图 (Attention KDE Heatmap)",
+        height=figure_height,
+        template=theme["plot_template"],
+        paper_bgcolor=theme["panel_bg"],
+        plot_bgcolor=theme["heatmap_bg_overlay"] if background is not None else theme["panel_bg"],
+        margin={"l": 28, "r": 20, "t": 50, "b": 30},
+        font={"color": theme["panel_text"], "family": "Aptos, Microsoft YaHei, sans-serif"},
+        xaxis={
+            "title": "Screen X",
+            "gridcolor": theme["panel_grid"],
+            "zeroline": False,
+            "showline": False,
+            "range": x_range,
+        },
+        yaxis={
+            "title": "Screen Y",
+            "showgrid": False,
+            "zeroline": False,
+            "showline": False,
+            "range": y_range,
+        },
+    )
+    return figure
+
+
+def plot_image_saliency_heatmap(
+    saliency_map: np.ndarray,
+    background_image: str | Path | Any | None = None,
+    screen_size: tuple[int, int] | None = None,
+    figure_height: int = 420,
+    theme_name: str = "dark",
+    palette: str = "theme_default",
+    heatmap_opacity: float = 0.62,
+    title: str = "图片快速显著性热力图 (OpenCV Fast Saliency)",
+) -> go.Figure:
+    """Render an image-derived saliency map as an interactive heatmap."""
+    theme = _visual_theme(theme_name)
+    heatmap_colorscale = _resolve_heatmap_colorscale(theme_name, palette)
+    heatmap_opacity = float(np.clip(heatmap_opacity, 0.15, 1.0))
+    density = np.nan_to_num(np.asarray(saliency_map, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    if density.ndim != 2:
+        raise ValueError("saliency_map must be a 2D array.")
+
+    figure = go.Figure()
+    background = _load_background_image(background_image)
+    map_height, map_width = density.shape
+    plot_size = screen_size or (map_width, map_height)
+    x_range = [0.0, float(plot_size[0])]
+    y_range = [float(plot_size[1]), 0.0]
+
+    if not np.any(density > 0):
+        _attach_background_image(figure, background=background, x_range=x_range, y_range=y_range, opacity=0.82)
+        figure.update_layout(
+            title=title,
+            height=figure_height,
+            template=theme["plot_template"],
+            paper_bgcolor=theme["panel_bg"],
+            plot_bgcolor=theme["heatmap_bg_overlay"] if background is not None else theme["panel_bg"],
+            margin={"l": 28, "r": 20, "t": 50, "b": 30},
+            font={"color": theme["panel_text"], "family": "Aptos, Microsoft YaHei, sans-serif"},
+            xaxis={
+                "title": "Screen X",
+                "gridcolor": theme["panel_grid"],
+                "zeroline": False,
+                "showline": False,
+                "range": x_range,
+            },
+            yaxis={
+                "title": "Screen Y",
+                "showgrid": False,
+                "zeroline": False,
+                "showline": False,
+                "range": y_range,
+            },
+        )
+        _add_empty_state_annotation(figure, "当前图片没有生成可用的显著性密度图", theme_name=theme_name)
+        return figure
+
+    x_centers = np.linspace(0.0, float(plot_size[0]), density.shape[1])
+    y_centers = np.linspace(0.0, float(plot_size[1]), density.shape[0])
+    positive = density[density > 0]
+    zmax = max(float(np.percentile(positive, 99.5)) if positive.size else 1.0, 1e-6)
+
+    figure.add_trace(
+        go.Heatmap(
+            x=x_centers,
+            y=y_centers,
+            z=density,
+            colorscale=heatmap_colorscale,
+            zmin=0.0,
+            zmax=zmax,
+            zsmooth="best",
+            opacity=heatmap_opacity,
+            hovertemplate="Screen X=%{x:.0f}<br>Screen Y=%{y:.0f}<br>显著性=%{z:.3f}<extra></extra>",
+            showscale=False,
+        )
+    )
+
+    _attach_background_image(figure, background=background, x_range=x_range, y_range=y_range, opacity=0.82)
+
+    figure.update_layout(
+        title=title,
         height=figure_height,
         template=theme["plot_template"],
         paper_bgcolor=theme["panel_bg"],
@@ -718,3 +898,21 @@ def _load_background_image(background_image: str | Path | Any | None) -> str | N
     image.save(buffer, format="PNG")
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
+
+
+def _with_alpha(color: str, alpha: float) -> str:
+    value = color.strip()
+    if value.startswith("rgba("):
+        channels = [component.strip() for component in value[5:-1].split(",")]
+        red, green, blue = [int(float(component)) for component in channels[:3]]
+        return f"rgba({red}, {green}, {blue}, {alpha:.3f})"
+    if value.startswith("rgb("):
+        channels = [component.strip() for component in value[4:-1].split(",")]
+        red, green, blue = [int(float(component)) for component in channels[:3]]
+        return f"rgba({red}, {green}, {blue}, {alpha:.3f})"
+
+    red_f, green_f, blue_f = matplotlib.colors.to_rgb(value)
+    red = int(round(red_f * 255))
+    green = int(round(green_f * 255))
+    blue = int(round(blue_f * 255))
+    return f"rgba({red}, {green}, {blue}, {alpha:.3f})"

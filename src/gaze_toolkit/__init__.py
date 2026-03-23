@@ -41,6 +41,7 @@ from gaze_toolkit.multimodal import MultiModalData, late_fusion
 from gaze_toolkit.pipeline import build_feature_dataset, run_pipeline, run_segmented_pipeline
 from gaze_toolkit.preprocess import handle_missing_samples, preprocess
 from gaze_toolkit.quality import QualityReport, assess_quality, format_quality_cards
+from gaze_toolkit.report_generator import InsightReport, ReportSection, generate_insight_report
 from gaze_toolkit.saliency import (
     COGNITIVE_SALIENCY_BACKEND,
     FAST_SALIENCY_BACKEND,
@@ -144,6 +145,8 @@ __all__ = [
     "predict_image_attention",
     "probe_deepgaze_runtime",
     "QualityReport",
+    "InsightReport",
+    "ReportSection",
     "register_feature",
     "register_loader",
     "register_model",
@@ -153,6 +156,7 @@ __all__ = [
     "run_segmented_pipeline",
     "assess_quality",
     "format_quality_cards",
+    "generate_insight_report",
     "segment_between_markers",
     "segment_by_marker_windows",
     "segment_by_time_ranges",

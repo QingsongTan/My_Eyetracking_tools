@@ -39,6 +39,9 @@ explain = [
   "lime>=0.2.0.1",
   "shap>=0.45",
 ]
+llm = [
+  "openai>=1.0",
+]
 signal = [
   "scipy>=1.12",
 ]

@@ -113,7 +113,7 @@ def test_require_deepgaze_python_reports_incomplete_runtime_folder(tmp_path) -> 
         saliency_module._require_deepgaze_python(project_root=tmp_path)
 
 
-def test_predict_image_attention_cognitive_backend_uses_worker_bridge(monkeypatch, tmp_path) -> None:
+def test_predict_image_attention_cognitive_backend_is_image_only_even_with_recording(monkeypatch, tmp_path) -> None:
     image = np.zeros((32, 48, 3), dtype=np.uint8)
     image[8:24, 12:28] = 255
     recording = analyze_recording(simulate_gaze_recording(seed=14)).enriched_recording
@@ -132,11 +132,9 @@ def test_predict_image_attention_cognitive_backend_uses_worker_bridge(monkeypatc
         np.save(saliency_map_path, saliency_map)
         return {
             "saliency_map_path": str(saliency_map_path),
-            "label": "DeepGazeIII Cognitive Saliency",
+            "label": "DeepGazeIIE Cognitive Saliency",
             "metadata": {
-                "deepgaze_model": "DeepGazeIII",
-                "nss_mean": 1.42,
-                "conditioning_fixation_count": len(captured_request["conditioning_fixations_x"]),
+                "deepgaze_model": "DeepGazeIIE",
             },
         }
 
@@ -151,9 +149,10 @@ def test_predict_image_attention_cognitive_backend_uses_worker_bridge(monkeypatc
 
     assert result.backend == COGNITIVE_SALIENCY_BACKEND
     assert result.saliency_map.shape == (32, 48)
-    assert result.metadata["deepgaze_model"] == "DeepGazeIII"
-    assert captured_request["recording_fixation_count"] >= 0
-    assert isinstance(captured_request["conditioning_fixations_x"], list)
+    assert result.metadata["deepgaze_model"] == "DeepGazeIIE"
+    assert captured_request["recording_fixation_count"] == 0
+    assert captured_request["conditioning_fixations_x"] == []
+    assert captured_request["evaluation_fixations_x"] == []
 
 
 def test_invoke_deepgaze_worker_prefers_response_payload_on_failure(monkeypatch, tmp_path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 import shutil
 import tempfile
@@ -13,11 +14,13 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 import yaml
 from PIL import Image
 
 from gaze_toolkit.aoi import (
     AOI,
+    AOIMetrics,
     assign_fixations_to_aoi,
     compute_aoi_metrics,
     compute_transition_matrix,
@@ -40,6 +43,7 @@ from gaze_toolkit.events import has_labeled_events
 from gaze_toolkit.io import from_frame
 from gaze_toolkit.pipeline import build_feature_dataset
 from gaze_toolkit.quality import QualityReport, assess_quality, find_missing_segments, format_quality_cards
+from gaze_toolkit.report_generator import generate_insight_report
 from gaze_toolkit.saliency import (
     COGNITIVE_SALIENCY_BACKEND,
     FAST_SALIENCY_BACKEND,
@@ -184,6 +188,8 @@ DASHBOARD_ACTIVE_TAB_KEY = "dashboard_active_tab"
 SCENARIO_LINKED_KEY = "dashboard_linked_scenario"
 SCENARIO_IMPORT_NOTICE_KEY = "dashboard_scenario_import_notice"
 BATCH_RESULTS_KEY = "dashboard_batch_results"
+REPORT_MARKDOWN_KEY = "dashboard_ai_report_markdown"
+REPORT_FILENAME_KEY = "dashboard_ai_report_filename"
 AOI_CANVAS_WIDTH = 640
 
 
@@ -770,16 +776,6 @@ def _render_single_session(
     display_analysis = selected_view.analysis if selected_view is not None else analysis
     display_title = _segment_title(selected_view)
 
-    display_metrics = display_analysis.features
-    st.markdown("**当前可视化对象**")
-    st.caption(f"当前图形与事件表展示的是：{display_title}")
-
-    focus_cols = st.columns(4)
-    focus_cols[0].metric("当前时长", f"{display_metrics['duration_ms'] / 1000:.2f}s")
-    focus_cols[1].metric("当前样本数", int(display_metrics["sample_count"]))
-    focus_cols[2].metric("当前注视数", int(display_metrics["fixation_count"]))
-    focus_cols[3].metric("当前眨眼数", int(display_metrics["blink_count"]))
-
     visual_controls = visual_controls or VisualControls(
         scanpath_palette="theme_default",
         heatmap_palette="theme_default",
@@ -821,6 +817,15 @@ def _render_single_session(
             width="stretch",
             config={"displaylogo": False},
         )
+
+    display_metrics = display_analysis.features
+    st.markdown("**当前可视化对象**")
+    st.caption(f"当前图形与事件表展示的是：{display_title}")
+    focus_cols = st.columns(4)
+    focus_cols[0].metric("当前时长", f"{display_metrics['duration_ms'] / 1000:.2f}s")
+    focus_cols[1].metric("当前样本数", int(display_metrics["sample_count"]))
+    focus_cols[2].metric("当前注视数", int(display_metrics["fixation_count"]))
+    focus_cols[3].metric("当前眨眼数", int(display_metrics["blink_count"]))
 
     _render_aoi_section(
         recording=display_analysis.enriched_recording,
@@ -868,7 +873,6 @@ def _render_single_session(
     if stimulus_image is not None:
         _render_stimulus_attention_section(
             stimulus_image=stimulus_image,
-            recording=display_analysis.enriched_recording,
             screen_size=screen_size,
             theme_name=theme_name,
             visual_controls=visual_controls,
@@ -898,7 +902,6 @@ def _render_single_session(
 def _render_stimulus_attention_section(
     stimulus_image: str | Path | Any,
     *,
-    recording: GazeRecording,
     screen_size: tuple[int, int],
     theme_name: str,
     visual_controls: VisualControls,
@@ -953,14 +956,13 @@ def _render_stimulus_attention_section(
         )
 
     with right:
-        st.markdown("### 认知模型热力图 (DeepGaze)")
-        st.caption("有真实注视历史时优先使用 DeepGazeIII；没有 fixation history 时会回退到 DeepGazeIIE。")
+        st.markdown("### 认知模型热力图 (DeepGazeIIE)")
+        st.caption("固定使用 DeepGazeIIE，根据当前图片内容预测人类注视先验，不读取上传的眼动轨迹。")
         if runtime_ok:
             try:
                 cognitive = predict_image_attention(
                     stimulus_image,
                     backend=COGNITIVE_SALIENCY_BACKEND,
-                    recording=recording,
                 )
             except RuntimeError as exc:
                 st.warning(f"DeepGaze 推理失败：{exc}")
@@ -984,8 +986,6 @@ def _render_stimulus_attention_section(
                 model_name = cognitive.metadata.get("deepgaze_model")
                 if model_name:
                     details.append(f"模型：{model_name}")
-                if "conditioning_fixation_count" in cognitive.metadata:
-                    details.append(f"条件 fixation 数：{int(cognitive.metadata['conditioning_fixation_count'])}")
                 if "nss_mean" in cognitive.metadata:
                     details.append(f"NSS：{cognitive.metadata['nss_mean']:.3f}")
                 if "sim" in cognitive.metadata:
@@ -1474,7 +1474,6 @@ def _render_segment_selector(segment_views: list[SegmentView]) -> SegmentView | 
     if not segment_views:
         return None
     if len(segment_views) == 1:
-        st.caption(f"当前仅有 1 个分段：{_segment_label(segment_views[0])}")
         return segment_views[0]
 
     selected_index = st.selectbox(
@@ -2189,6 +2188,8 @@ def _render_batch_tab(theme_name: str = "dark") -> None:
         key="batch-download-markdown",
     )
 
+    _render_report_section(success_df)
+
 
 def _save_uploaded_batch_files(uploaded_files: list[Any], temp_dir: Path) -> list[Path]:
     paths: list[Path] = []
@@ -2206,6 +2207,200 @@ def _successful_batch_rows(batch_df: pd.DataFrame) -> pd.DataFrame:
         return batch_df.copy()
     errors = batch_df["error"].fillna("").astype(str).str.strip()
     return batch_df.loc[errors.eq("")].copy()
+
+
+def _render_report_section(success_df: pd.DataFrame) -> None:
+    st.markdown("---")
+    st.markdown("### AI 分析报告")
+
+    if success_df.empty:
+        st.info("当前没有可用于生成 AI 报告的成功记录，请先完成至少一条批量分析。")
+        return
+
+    row_options = success_df.index.tolist()
+    selected_index = st.selectbox(
+        "报告对象",
+        options=row_options,
+        format_func=lambda index: _batch_report_option_label(success_df, index),
+        key="batch-report-row-select",
+    )
+    mode_label = st.radio(
+        "报告模式",
+        options=["模板模式 (离线)", "LLM 增强模式"],
+        horizontal=True,
+        key="batch-report-mode",
+    )
+    use_llm = mode_label == "LLM 增强模式"
+
+    backend = "openai"
+    model = "gpt-4o-mini"
+    api_key = None
+    if use_llm:
+        llm_cols = st.columns(3, gap="large")
+        backend = llm_cols[0].selectbox(
+            "后端",
+            options=["openai", "anthropic", "custom"],
+            format_func=lambda value: {"openai": "OpenAI", "anthropic": "Anthropic", "custom": "Custom"}.get(value, value),
+            key="batch-report-llm-backend",
+        )
+        model = llm_cols[1].text_input(
+            "模型",
+            value="gpt-4o-mini" if backend == "openai" else "",
+            key="batch-report-llm-model",
+        ).strip() or ("gpt-4o-mini" if backend == "openai" else "")
+        api_key_value = llm_cols[2].text_input(
+            "API Key",
+            value="",
+            type="password",
+            placeholder="留空则从环境变量读取",
+            key="batch-report-llm-api-key",
+        ).strip()
+        api_key = api_key_value or None
+    else:
+        st.caption("模板模式完全离线，不依赖任何外部 API。")
+
+    if st.button("生成报告", key="batch-report-generate", use_container_width=True):
+        selected_row = success_df.loc[selected_index]
+        feature_map = _batch_row_feature_map(selected_row)
+        report_filename = f"{Path(str(selected_row.get('file_path', 'gaze_report'))).stem or 'gaze_report'}_insight_report.md"
+        with st.spinner("正在生成报告..."):
+            report = generate_insight_report(
+                feature_map,
+                scenario_context=_linked_scenario_context(),
+                aoi_metrics=_batch_row_aoi_metrics(selected_row),
+                quality_grade=_batch_row_quality_grade(selected_row),
+                use_llm=use_llm,
+                llm_backend=backend,
+                llm_model=model or "gpt-4o-mini",
+                api_key=api_key,
+                language="zh",
+            )
+        st.session_state[REPORT_MARKDOWN_KEY] = report.to_markdown()
+        st.session_state[REPORT_FILENAME_KEY] = report_filename
+
+    report_markdown = st.session_state.get(REPORT_MARKDOWN_KEY)
+    if not isinstance(report_markdown, str) or not report_markdown.strip():
+        return
+
+    st.markdown(report_markdown)
+    action_cols = st.columns(2, gap="large")
+    action_cols[0].download_button(
+        "下载 Markdown",
+        data=report_markdown,
+        file_name=str(st.session_state.get(REPORT_FILENAME_KEY, "gaze_toolkit_insight_report.md")),
+        mime="text/markdown",
+        use_container_width=True,
+        key="batch-report-download-markdown",
+    )
+    with action_cols[1]:
+        components.html(_copy_button_html(report_markdown), height=44)
+
+
+def _batch_report_option_label(success_df: pd.DataFrame, row_index: int) -> str:
+    file_path = str(success_df.loc[row_index].get("file_path", "")).strip()
+    if file_path:
+        return Path(file_path).name
+    return f"record_{list(success_df.index).index(row_index) + 1}"
+
+
+def _batch_row_feature_map(row: pd.Series) -> dict[str, float]:
+    features: dict[str, float] = {}
+    for name, value in row.items():
+        if pd.isna(value):
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        features[str(name)] = numeric
+    return features
+
+
+def _batch_row_aoi_metrics(row: pd.Series) -> dict[str, AOIMetrics] | None:
+    suffix_map = {
+        "_ttff_ms": "first_fixation_time",
+        "_dwell_ms": "total_dwell_time",
+        "_dwell_prop": "dwell_proportion",
+        "_visit_count": "visit_count",
+        "_fixation_count": "fixation_count",
+    }
+    grouped: dict[str, dict[str, float]] = {}
+    for column_name, value in row.items():
+        if pd.isna(value):
+            continue
+        for suffix, target_name in suffix_map.items():
+            if str(column_name).endswith(suffix):
+                aoi_name = str(column_name)[: -len(suffix)]
+                grouped.setdefault(aoi_name, {})[target_name] = float(value)
+                break
+
+    if not grouped:
+        return None
+
+    metrics: dict[str, AOIMetrics] = {}
+    for aoi_name, values in grouped.items():
+        visit_count = int(round(values.get("visit_count", 0.0)))
+        fixation_count = int(round(values.get("fixation_count", 0.0)))
+        total_dwell_time = float(values.get("total_dwell_time", 0.0))
+        metrics[aoi_name] = AOIMetrics(
+            aoi_name=aoi_name,
+            first_fixation_time=values.get("first_fixation_time"),
+            total_dwell_time=total_dwell_time,
+            dwell_proportion=float(values.get("dwell_proportion", 0.0)),
+            fixation_count=fixation_count,
+            visit_count=visit_count,
+            revisit_count=max(visit_count - 1, 0),
+            mean_fixation_duration=(total_dwell_time / fixation_count) if fixation_count > 0 else 0.0,
+        )
+    return metrics
+
+
+def _batch_row_quality_grade(row: pd.Series) -> str | None:
+    value = row.get("quality_grade")
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _linked_scenario_context() -> dict[str, Any] | None:
+    linked_name = str(st.session_state.get(SCENARIO_LINKED_KEY, "")).strip()
+    if not linked_name:
+        return None
+
+    for scenario_key in list_scenarios():
+        try:
+            scenario = load_scenario(scenario_key)
+        except (FileNotFoundError, ValueError, yaml.YAMLError):
+            continue
+        if scenario.name == linked_name or scenario_key == linked_name:
+            return {
+                "name": scenario.name,
+                "product": scenario.product,
+                "design_type": scenario.research_design.type,
+            }
+    return {"name": linked_name}
+
+
+def _copy_button_html(markdown_text: str) -> str:
+    payload = json.dumps(markdown_text, ensure_ascii=False)
+    button_id = f"copy-report-{abs(hash(markdown_text))}"
+    return f"""
+<button id="{button_id}" style="width:100%;height:2.5rem;border-radius:0.5rem;border:1px solid #cbd5e1;background:#ffffff;cursor:pointer;">
+  复制到剪贴板
+</button>
+<script>
+const copyButton = document.getElementById({json.dumps(button_id)});
+copyButton.addEventListener("click", async () => {{
+  try {{
+    await navigator.clipboard.writeText({payload});
+    copyButton.innerText = "已复制";
+  }} catch (error) {{
+    copyButton.innerText = "复制失败";
+  }}
+}});
+</script>
+"""
 
 
 def _quality_counts_frame(batch_df: pd.DataFrame) -> pd.DataFrame:

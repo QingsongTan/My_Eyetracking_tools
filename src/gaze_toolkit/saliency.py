@@ -206,7 +206,15 @@ def _predict_cognitive_saliency(
 ) -> ImageSaliencyResult:
     project_root_path = _resolve_project_root(project_root)
     python_path = _require_deepgaze_python(project_root=project_root_path, runtime_python=runtime_python)
-    fixation_payload = _extract_fixation_payload(recording)
+    del recording
+
+    fixation_payload = {
+        "conditioning_fixations_x": [],
+        "conditioning_fixations_y": [],
+        "evaluation_fixations_x": [],
+        "evaluation_fixations_y": [],
+        "fixation_count": 0,
+    }
 
     with tempfile.TemporaryDirectory(prefix="gaze-toolkit-deepgaze-") as temp_dir_name:
         temp_dir = Path(temp_dir_name)
@@ -388,39 +396,6 @@ def _describe_missing_deepgaze_runtime(*, project_root: str | Path | None = None
         f"{DEEPGAZE_RUNTIME_DIRNAME}/Scripts/python.exe under the project root. "
         f"{DEEPGAZE_RUNTIME_REBUILD_HINT}"
     )
-
-
-def _extract_fixation_payload(recording: GazeRecording | None) -> dict[str, Any]:
-    if recording is None:
-        return {
-            "conditioning_fixations_x": [],
-            "conditioning_fixations_y": [],
-            "evaluation_fixations_x": [],
-            "evaluation_fixations_y": [],
-            "fixation_count": 0,
-        }
-
-    fixations: list[tuple[float, float]] = []
-    for event in recording.events:
-        if event.kind != "fixation":
-            continue
-        x = event.metadata.get("centroid_x")
-        y = event.metadata.get("centroid_y")
-        if x is None or y is None:
-            continue
-        if not np.isfinite(x) or not np.isfinite(y):
-            continue
-        fixations.append((float(x), float(y)))
-
-    xs = [point[0] for point in fixations]
-    ys = [point[1] for point in fixations]
-    return {
-        "conditioning_fixations_x": xs,
-        "conditioning_fixations_y": ys,
-        "evaluation_fixations_x": xs,
-        "evaluation_fixations_y": ys,
-        "fixation_count": len(fixations),
-    }
 
 
 def _compute_opencv_saliency(

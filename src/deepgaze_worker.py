@@ -97,10 +97,12 @@ def _run_inference(payload: dict[str, Any], *, response_path: Path) -> dict[str,
 
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     height, width = image_rgb.shape[:2]
-    conditioning_x = np.asarray(payload.get("conditioning_fixations_x", []), dtype=np.float32)
-    conditioning_y = np.asarray(payload.get("conditioning_fixations_y", []), dtype=np.float32)
-    evaluation_x = np.asarray(payload.get("evaluation_fixations_x", []), dtype=np.float32)
-    evaluation_y = np.asarray(payload.get("evaluation_fixations_y", []), dtype=np.float32)
+    # The dashboard's DeepGaze panel is intentionally image-only: uploaded
+    # gaze samples must not condition the saliency prediction.
+    conditioning_x = np.empty(0, dtype=np.float32)
+    conditioning_y = np.empty(0, dtype=np.float32)
+    evaluation_x = np.empty(0, dtype=np.float32)
+    evaluation_y = np.empty(0, dtype=np.float32)
 
     started = perf_counter()
     centerbias_path = _ensure_centerbias_template()
@@ -116,23 +118,9 @@ def _run_inference(payload: dict[str, Any], *, response_path: Path) -> dict[str,
     image_tensor = torch.tensor(image_rgb.transpose(2, 0, 1)[None], dtype=torch.float32)
     centerbias_tensor = torch.tensor(centerbias[None], dtype=torch.float32)
 
-    if conditioning_x.size > 0 and conditioning_y.size > 0:
-        model = deepgaze_pytorch.DeepGazeIII(pretrained=True)
-        history_x, history_y = _prepare_scanpath_history(
-            conditioning_x=conditioning_x,
-            conditioning_y=conditioning_y,
-            width=width,
-            height=height,
-            included_fixations=model.included_fixations,
-        )
-        x_hist_tensor = torch.tensor(history_x[None], dtype=torch.float32)
-        y_hist_tensor = torch.tensor(history_y[None], dtype=torch.float32)
-        log_density = model(image_tensor, centerbias_tensor, x_hist_tensor, y_hist_tensor)
-        model_label = "DeepGazeIII"
-    else:
-        model = deepgaze_pytorch.DeepGazeIIE(pretrained=True)
-        log_density = model(image_tensor, centerbias_tensor)
-        model_label = "DeepGazeIIE"
+    model = deepgaze_pytorch.DeepGazeIIE(pretrained=True)
+    log_density = model(image_tensor, centerbias_tensor)
+    model_label = "DeepGazeIIE"
 
     log_density_map = log_density.detach().cpu().numpy()[0, 0]
     saliency_map = np.exp(log_density_map - logsumexp(log_density_map)).astype(np.float32)

@@ -35,6 +35,9 @@ deep = [
   "pysaliency>=0.2.22",
   "scipy>=1.12",
 ]
+movement = [
+  "pymovements>=0.26",
+]
 explain = [
   "lime>=0.2.0.1",
   "shap>=0.45",

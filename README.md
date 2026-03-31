@@ -135,6 +135,25 @@ streamlit run src/gaze_toolkit/dashboard.py
 - 比较眼动单模态与眼动+心率多模态结果
 - 说明这条架构如何扩展到真实人因研究中的更多传感器
 
+### 4. 研究方法验证展示
+
+- 在 `意图建模实验台` 中运行 `pymovements` 公共数据集事件检测对照实验
+- 使用 `ToyDatasetEyeLink` 的原始 EyeLink `.asc` 事件作为近似 ground truth
+- 对比：
+  - 项目原生阈值法
+  - `pymovements I-VT`
+  - `pymovements I-DT`
+- 自动生成方法学结论摘要与 Markdown 报告
+
+这部分不是单纯展示“算法能跑”，而是展示：
+
+- 能接公共数据集
+- 能读取原始 EyeLink 事件
+- 能做跨工具方法对照
+- 能把结果沉淀成可解释、可分享的研究结论
+
+这对人因工程与用户体验研究岗位尤其重要，因为它更接近真实研究工作里的“方法验证”和“信度讨论”。
+
 ## 核心 API
 
 ```python
@@ -154,6 +173,7 @@ comparison = compare_modalities(num_sessions=32)
 
 - [examples/demo_pipeline.py](examples/demo_pipeline.py)
 - [examples/demo_multimodal.py](examples/demo_multimodal.py)
+- [examples/demo_event_benchmark.py](examples/demo_event_benchmark.py)
 
 教程 notebook：
 
@@ -169,6 +189,16 @@ comparison = compare_modalities(num_sessions=32)
 ```bash
 pytest
 ```
+
+如果你想单独验证公共数据集事件检测对照链路：
+
+```bash
+python examples/demo_event_benchmark.py
+```
+
+更多作品集表达建议见：
+
+- [docs/method-validation-showcase.md](docs/method-validation-showcase.md)
 
 ## 未验证前提
 

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import sys
 import tempfile
 import traceback
 import urllib.request
+import warnings
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -55,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
 def _run_self_check() -> int:
     try:
         _prepare_torch_runtime_environment()
+        _configure_warning_filters()
         import cv2
         import deepgaze_pytorch
         import pysaliency
@@ -81,6 +85,7 @@ def _run_self_check() -> int:
 
 def _run_inference(payload: dict[str, Any], *, response_path: Path) -> dict[str, Any]:
     _prepare_torch_runtime_environment()
+    _configure_warning_filters()
 
     import cv2
     import deepgaze_pytorch
@@ -118,7 +123,8 @@ def _run_inference(payload: dict[str, Any], *, response_path: Path) -> dict[str,
     image_tensor = torch.tensor(image_rgb.transpose(2, 0, 1)[None], dtype=torch.float32)
     centerbias_tensor = torch.tensor(centerbias[None], dtype=torch.float32)
 
-    model = deepgaze_pytorch.DeepGazeIIE(pretrained=True)
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        model = deepgaze_pytorch.DeepGazeIIE(pretrained=True)
     log_density = model(image_tensor, centerbias_tensor)
     model_label = "DeepGazeIIE"
 
@@ -201,6 +207,24 @@ def _prepare_torch_runtime_environment() -> None:
     if torch_lib_dir.exists():
         sanitized_entries.insert(0, str(torch_lib_dir))
     os.environ["PATH"] = os.pathsep.join(sanitized_entries)
+
+
+def _configure_warning_filters() -> None:
+    warnings.filterwarnings(
+        "ignore",
+        message=r"pkg_resources is deprecated as an API\..*",
+        category=UserWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"The parameter 'pretrained' is deprecated since 0\.13.*",
+        category=UserWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Arguments other than a weight enum or `None` for 'weights' are deprecated since 0\.13.*",
+        category=UserWarning,
+    )
 
 
 def _ensure_centerbias_template() -> Path:

@@ -38,7 +38,23 @@ from gaze_toolkit.batch import (
     build_html_report_content,
     build_markdown_report_content,
 )
+from gaze_toolkit.cognitive_load import (
+    DEMO_CLASSIFICATION_TARGET,
+    DEMO_REGRESSION_TARGET,
+    CognitiveLoadExperimentReport,
+    candidate_target_columns,
+    infer_task_from_target,
+    run_cognitive_load_experiment,
+    simulate_cognitive_load_dataset,
+)
 from gaze_toolkit.datasets import simulate_gaze_recording
+from gaze_toolkit.event_benchmark import (
+    EventBenchmarkResult,
+    build_event_benchmark_markdown,
+    run_event_detection_benchmark,
+    run_public_dataset_benchmark,
+    summarize_event_benchmark,
+)
 from gaze_toolkit.events import has_labeled_events
 from gaze_toolkit.io import from_frame
 from gaze_toolkit.pipeline import build_feature_dataset
@@ -70,6 +86,7 @@ from gaze_toolkit.statistics import (
 from gaze_toolkit.tables import fixation_table
 from gaze_toolkit.types import GazeRecording
 from gaze_toolkit.visualization import (
+    DEFAULT_HEATMAP_PALETTE,
     plot_confusion,
     plot_feature_importance,
     plot_image_saliency_heatmap,
@@ -133,6 +150,15 @@ MODEL_OPTIONS = {
     "支持向量机": "svm",
     "逻辑回归": "logistic_regression",
 }
+REGRESSION_MODEL_OPTIONS = {
+    "随机森林": "random_forest",
+    "梯度提升树": "gradient_boosting",
+    "支持向量机回归": "svm",
+}
+PUBLIC_DATASET_OPTIONS = {
+    "ToyDataset": "ToyDataset",
+    "ToyDatasetEyeLink": "ToyDatasetEyeLink",
+}
 MISSING_OPTIONS = {
     "自动插值": "interpolate",
     "清洗无效样本": "drop",
@@ -168,6 +194,7 @@ SCANPATH_PALETTE_OPTIONS = {
     "落日橙": "sunset",
 }
 HEATMAP_PALETTE_OPTIONS = {
+    "霓虹聚焦（默认）": DEFAULT_HEATMAP_PALETTE,
     "主题默认": "theme_default",
     "极光蓝青": "aurora",
     "冰川蓝": "glacier",
@@ -322,6 +349,62 @@ def main() -> None:
         _render_scenario_tab()
 
 
+@st.cache_data(show_spinner=False)
+def _cached_intent_experiment(
+    num_sessions: int,
+    model_name: str,
+    random_state: int,
+) -> Any:
+    return run_intent_experiment(
+        num_sessions=num_sessions,
+        model_name=model_name,
+        random_state=random_state,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_modality_comparison(
+    num_sessions: int,
+    model_name: str,
+    random_state: int,
+) -> Any:
+    return compare_modalities(
+        num_sessions=num_sessions,
+        model_name=model_name,
+        random_state=random_state,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_cognitive_load_demo_experiment(
+    num_sessions: int,
+    target: str,
+    task: str,
+    model_name: str,
+    random_state: int,
+) -> CognitiveLoadExperimentReport:
+    dataset = simulate_cognitive_load_dataset(num_sessions=num_sessions, random_state=random_state)
+    return run_cognitive_load_experiment(
+        dataset,
+        target=target,
+        task=task,
+        model_name=model_name,
+        random_state=random_state,
+        data_source="demo",
+        note="内置演示标签由 pupil + gaze 负荷特征启发式合成，用于展示分类 / 回归链路，不代表真实 ground truth。",
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_public_dataset_benchmark(dataset_name: str, recording_index: int) -> EventBenchmarkResult:
+    return run_public_dataset_benchmark(
+        dataset_name=dataset_name,
+        recording_index=recording_index,
+        root_dir=Path(".cache") / "pymovements" / dataset_name,
+        download=True,
+    )
+
+
 def _render_overview_strip() -> None:
     st.markdown(
         """
@@ -438,6 +521,11 @@ def _build_analysis_controls(recording: GazeRecording) -> DashboardControls:
     missing_label = st.sidebar.selectbox("缺失值处理", options=list(MISSING_OPTIONS), index=0)
     smooth_window = int(st.sidebar.slider("平滑窗口", min_value=3, max_value=21, step=2, value=5))
     include_complexity = st.sidebar.toggle("包含复杂度特征", value=True)
+    include_pupil_load_features = st.sidebar.toggle(
+        "启用瞳孔 / 工作负荷",
+        value=False,
+        help="开启后会对瞳孔信号做额外清洗与基线校正，并在分析结果中加入工作负荷导向的 pupil 特征。",
+    )
 
     has_original_labels = has_labeled_events(recording)
     if has_original_labels:
@@ -471,7 +559,10 @@ def _build_analysis_controls(recording: GazeRecording) -> DashboardControls:
             "blink_min_duration_ms": blink_min_duration_ms,
             "source": event_source,
         },
-        feature_params={"include_complexity": include_complexity},
+        feature_params={
+            "include_complexity": include_complexity,
+            "include_pupil_load_features": include_pupil_load_features,
+        },
         segmentation_config=segmentation_config,
         segmentation_summary=segmentation_summary,
         segmentation_warning=segmentation_warning,
@@ -778,7 +869,7 @@ def _render_single_session(
 
     visual_controls = visual_controls or VisualControls(
         scanpath_palette="theme_default",
-        heatmap_palette="theme_default",
+        heatmap_palette=DEFAULT_HEATMAP_PALETTE,
         fixation_opacity=0.72,
         heatmap_opacity=0.60,
     )
@@ -870,6 +961,9 @@ def _render_single_session(
             )
         _render_panel_table(event_table.head(24), max_height_px=360)
 
+    if controls.feature_params.get("include_pupil_load_features", False):
+        _render_pupil_load_section(display_analysis, theme_name=theme_name)
+
     if stimulus_image is not None:
         _render_stimulus_attention_section(
             stimulus_image=stimulus_image,
@@ -897,6 +991,88 @@ def _render_single_session(
     else:
         st.caption("切换上方“当前展示分段”后，scanpath、heatmap、信号总览和事件表都会同步刷新。")
         _render_panel_table(_format_segment_table(segment_table), hide_index=True, max_height_px=300)
+
+
+def _render_pupil_load_section(analysis: RecordingAnalysis, theme_name: str = "dark") -> None:
+    st.markdown("**瞳孔 / 工作负荷**")
+    if analysis.pupil_trace.empty or not analysis.pupil_summary:
+        st.info("当前记录没有可用的瞳孔工作负荷数据，无法展示该结果。")
+        return
+
+    summary = analysis.pupil_summary
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("基线校正均值", f"{summary['pupil_bc_mean']:.3f}")
+    metric_cols[1].metric("基线校正峰值", f"{summary['pupil_bc_peak']:.3f}")
+    metric_cols[2].metric("相位峰值", f"{summary['pupil_phasic_peak']:.3f}")
+    metric_cols[3].metric("扩张潜伏期", f"{summary['pupil_dilation_latency_ms']:.0f} ms")
+    metric_cols[4].metric("眨眼样本占比", f"{summary['pupil_blink_ratio']:.1%}")
+
+    st.caption("展示原始瞳孔、清洗后瞳孔与基线校正后的瞳孔变化，用于快速判断负荷波动是否可信。")
+    trace = analysis.pupil_trace.copy()
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=trace["timestamp_ms"],
+            y=trace["pupil_raw"],
+            mode="lines",
+            name="原始瞳孔",
+            line={"color": "#8A7BFF", "width": 1.6},
+            opacity=0.55,
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=trace["timestamp_ms"],
+            y=trace["pupil_cleaned"],
+            mode="lines",
+            name="清洗后瞳孔",
+            line={"color": "#00F3FF", "width": 2.0},
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=trace["timestamp_ms"],
+            y=trace["pupil_baseline_corrected"],
+            mode="lines",
+            name="基线校正后",
+            line={"color": "#FFC857", "width": 2.0},
+            yaxis="y2",
+        )
+    )
+    blink_points = trace.loc[trace["blink_mask"]]
+    if not blink_points.empty:
+        figure.add_trace(
+            go.Scatter(
+                x=blink_points["timestamp_ms"],
+                y=blink_points["pupil_cleaned"],
+                mode="markers",
+                name="眨眼/插值片段",
+                marker={"color": "#FF6B6B", "size": 6},
+            )
+        )
+    figure.update_layout(
+        template="plotly_white" if theme_name == "light" else "plotly_dark",
+        height=320,
+        margin={"l": 20, "r": 20, "t": 36, "b": 24},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0.0},
+        xaxis={"title": "时间 (ms)"},
+        yaxis={"title": "瞳孔直径"},
+        yaxis2={"title": "基线校正值", "overlaying": "y", "side": "right", "showgrid": False},
+    )
+    st.plotly_chart(
+        figure,
+        key="single-session-pupil-load-trace",
+        width="stretch",
+        config={"displaylogo": False},
+    )
+
+    summary_frame = (
+        pd.Series(summary, name="数值")
+        .rename_axis("特征")
+        .reset_index()
+    )
+    summary_frame["特征"] = summary_frame["特征"].map(_localize_feature_name)
+    _render_panel_table(summary_frame, hide_index=True, max_height_px=280)
 
 
 def _render_stimulus_attention_section(
@@ -1520,17 +1696,223 @@ def _render_panel_table(
 
 
 def _render_modeling_workbench(theme_name: str = "dark") -> None:
-    st.subheader("意图建模实验台")
+    st.subheader("意图与工作负荷建模实验台")
     linked_scenario = st.session_state.get(SCENARIO_LINKED_KEY)
     if linked_scenario:
         st.caption(f"当前联动研究模板：{linked_scenario}")
+    _render_cognitive_load_workbench(theme_name=theme_name)
+    st.divider()
+    _render_intent_baseline_section(theme_name=theme_name)
+    _render_public_dataset_benchmark_section(theme_name=theme_name)
+
+
+def _render_cognitive_load_workbench(theme_name: str = "dark") -> None:
+    st.markdown("### 工作负荷分类 / 回归实验台")
+    st.caption(
+        "这里不再只停留在 pupil 特征展示，而是把已提取的眼动 / 瞳孔特征真正接到监督学习实验。"
+        "可直接运行内置演示数据，也可上传你自己的已标注特征表。"
+    )
+    data_source = st.radio(
+        "实验数据来源",
+        options=["内置工作负荷演示数据", "上传已标注特征表 CSV"],
+        horizontal=True,
+        key="cognitive-load-source",
+    )
+
+    if data_source == "内置工作负荷演示数据":
+        controls = st.columns([1, 1, 1, 1], gap="large")
+        num_sessions = int(
+            controls[0].slider(
+                "演示会话数",
+                min_value=18,
+                max_value=96,
+                value=36,
+                step=6,
+                key="cognitive-load-demo-sessions",
+            )
+        )
+        target_label = controls[1].selectbox(
+            "实验目标",
+            options=["工作负荷等级（分类）", "工作负荷评分（回归）"],
+            index=0,
+            key="cognitive-load-demo-target",
+        )
+        task = "classification" if "分类" in target_label else "regression"
+        target = DEMO_CLASSIFICATION_TARGET if task == "classification" else DEMO_REGRESSION_TARGET
+        model_options = MODEL_OPTIONS if task == "classification" else REGRESSION_MODEL_OPTIONS
+        model_label = controls[2].selectbox(
+            "模型类型",
+            options=list(model_options),
+            index=0,
+            key="cognitive-load-demo-model",
+        )
+        random_state = int(
+            controls[3].slider(
+                "实验随机种子",
+                min_value=1,
+                max_value=999,
+                value=42,
+                key="cognitive-load-demo-seed",
+            )
+        )
+        report = _cached_cognitive_load_demo_experiment(
+            num_sessions=num_sessions,
+            target=target,
+            task=task,
+            model_name=model_options[model_label],
+            random_state=random_state,
+        )
+        _render_cognitive_load_report(report=report, theme_name=theme_name)
+        return
+
+    uploaded = st.file_uploader(
+        "上传已标注特征表（CSV）",
+        type=["csv"],
+        key="cognitive-load-upload-csv",
+    )
+    if uploaded is None:
+        st.info("上传一张已标注的特征表后，即可在这里训练工作负荷分类或回归模型。")
+        return
+
+    dataset = pd.read_csv(uploaded)
+    targets = candidate_target_columns(dataset)
+    if not targets:
+        st.warning("当前 CSV 中没有找到至少包含 2 个不同取值的候选目标列。")
+        return
+
+    controls = st.columns([1.2, 1.0, 1.0, 1.0], gap="large")
+    target = controls[0].selectbox("目标列", options=targets, index=0, key="cognitive-load-upload-target")
+    inferred_task = infer_task_from_target(dataset[target])
+    task_mode = controls[1].selectbox(
+        "实验任务",
+        options=["自动判断", "分类", "回归"],
+        index=0,
+        key="cognitive-load-upload-task",
+        help=f"自动判断当前会把 `{target}` 识别为{ '分类' if inferred_task == 'classification' else '回归' }任务。",
+    )
+    task = inferred_task if task_mode == "自动判断" else ("classification" if task_mode == "分类" else "regression")
+    model_options = MODEL_OPTIONS if task == "classification" else REGRESSION_MODEL_OPTIONS
+    model_label = controls[2].selectbox(
+        "模型类型",
+        options=list(model_options),
+        index=0,
+        key="cognitive-load-upload-model",
+    )
+    random_state = int(
+        controls[3].slider(
+            "实验随机种子",
+            min_value=1,
+            max_value=999,
+            value=42,
+            key="cognitive-load-upload-seed",
+        )
+    )
+
+    note = (
+        "上传模式默认把所有数值列都作为候选特征，并排除 session / condition 等常见元数据列。"
+        "如果你的表里同时包含多个目标列，请只保留这次要预测的那一列。"
+    )
+    try:
+        report = run_cognitive_load_experiment(
+            dataset,
+            target=target,
+            task=task,
+            model_name=model_options[model_label],
+            random_state=random_state,
+            data_source="uploaded_csv",
+            note=note,
+        )
+    except Exception as exc:
+        st.warning(f"工作负荷实验运行失败：{exc}")
+        return
+
+    _render_cognitive_load_report(report=report, theme_name=theme_name)
+
+
+def _render_cognitive_load_report(report: CognitiveLoadExperimentReport, theme_name: str = "dark") -> None:
+    localized_target = _localize_feature_name(report.target)
+    task_label = "分类" if report.task == "classification" else "回归"
+    st.markdown("**实验说明**")
+    st.caption(
+        f"当前任务：{task_label}；目标列：{localized_target}；样本数：{len(report.dataset)}；"
+        f"建模特征数：{len(report.result.feature_names)}；数据源：{report.data_source}。"
+    )
+    if report.note:
+        st.info(report.note)
+
+    if report.task == "classification":
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("准确率", f"{report.result.metrics.get('accuracy', 0.0):.3f}")
+        metric_cols[1].metric("F1 宏平均", f"{report.result.metrics.get('f1_macro', 0.0):.3f}")
+        metric_cols[2].metric("ROC AUC", f"{report.result.metrics.get('roc_auc', 0.0):.3f}")
+        metric_cols[3].metric("测试集样本数", len(report.holdout_predictions))
+    else:
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("R²", f"{report.result.metrics.get('r2', 0.0):.3f}")
+        metric_cols[1].metric("MAE", f"{report.result.metrics.get('mae', 0.0):.3f}")
+        metric_cols[2].metric("RMSE", f"{report.result.metrics.get('rmse', 0.0):.3f}")
+        metric_cols[3].metric("测试集样本数", len(report.holdout_predictions))
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        figure, axis = plt.subplots(figsize=(6, 4))
+        plot_metrics(report.result.metrics, ax=axis, theme_name=theme_name)
+        st.pyplot(figure, clear_figure=True, width="stretch")
+
+        if not report.holdout_predictions.empty:
+            if report.task == "classification":
+                figure, axis = plt.subplots(figsize=(5, 5))
+                plot_confusion(
+                    report.holdout_predictions["y_true"].to_numpy(),
+                    report.holdout_predictions["y_pred"].to_numpy(),
+                    ax=axis,
+                    theme_name=theme_name,
+                )
+                st.pyplot(figure, clear_figure=True, width="stretch")
+            else:
+                st.plotly_chart(
+                    _build_regression_prediction_figure(report.holdout_predictions, theme_name=theme_name),
+                    use_container_width=True,
+                )
+
+    with right:
+        figure, axis = plt.subplots(figsize=(6, 4.8))
+        localized_importance = report.feature_importance.copy()
+        localized_importance["feature"] = localized_importance["feature"].map(_localize_feature_name)
+        plot_feature_importance(localized_importance, ax=axis, theme_name=theme_name)
+        st.pyplot(figure, clear_figure=True, width="stretch")
+        importance = localized_importance.head(15).rename(
+            columns={
+                "feature": "特征",
+                "importance_mean": "平均重要性",
+                "importance_std": "重要性标准差",
+            }
+        )
+        _render_panel_table(importance.round(4), hide_index=True, max_height_px=360)
+
+    st.markdown("**Holdout 预测结果**")
+    holdout = report.holdout_predictions.copy()
+    holdout = holdout.rename(columns={"y_true": "真实值", "y_pred": "预测值", "residual": "残差"})
+    _render_panel_table(holdout.round(4), hide_index=True, max_height_px=280)
+    st.download_button(
+        "下载 Holdout 预测结果 CSV",
+        data=holdout.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"cognitive-load-holdout-{report.task}.csv",
+        mime="text/csv",
+        key=f"download-cognitive-load-{report.task}",
+    )
+
+
+def _render_intent_baseline_section(theme_name: str = "dark") -> None:
+    st.markdown("### 意图识别基线实验")
+    st.caption("保留原有的阅读意图识别 demo，便于和新的工作负荷实验台并行展示。")
     controls = st.columns([1, 1, 1])
     num_sessions = int(controls[0].slider("合成会话数", min_value=12, max_value=80, value=32, step=4))
-    model_label = controls[1].selectbox("模型类型", options=list(MODEL_OPTIONS), index=0)
-    random_state = int(controls[2].slider("实验随机种子", min_value=1, max_value=999, value=42))
+    model_label = controls[1].selectbox("模型类型", options=list(MODEL_OPTIONS), index=0, key="intent-model-type")
+    random_state = int(controls[2].slider("实验随机种子", min_value=1, max_value=999, value=42, key="intent-random-state"))
     feature_df = _build_statistics_feature_dataset(num_sessions=num_sessions, random_state=random_state)
 
-    report = run_intent_experiment(
+    report = _cached_intent_experiment(
         num_sessions=num_sessions,
         model_name=MODEL_OPTIONS[model_label],
         random_state=random_state,
@@ -1573,6 +1955,171 @@ def _render_modeling_workbench(theme_name: str = "dark") -> None:
         _render_panel_table(importance, hide_index=True, max_height_px=360)
 
     _render_statistics_section(feature_df=feature_df, theme_name=theme_name)
+
+
+def _build_regression_prediction_figure(
+    holdout: pd.DataFrame,
+    *,
+    theme_name: str = "dark",
+) -> go.Figure:
+    theme = "plotly_white" if theme_name == "light" else "plotly_dark"
+    frame = holdout.copy()
+    frame["y_true"] = pd.to_numeric(frame["y_true"], errors="coerce")
+    frame["y_pred"] = pd.to_numeric(frame["y_pred"], errors="coerce")
+    frame["residual"] = pd.to_numeric(frame.get("residual"), errors="coerce")
+    frame = frame.dropna(subset=["y_true", "y_pred"])
+    figure = go.Figure()
+    if frame.empty:
+        figure.update_layout(
+            title="回归预测对照",
+            template=theme,
+            height=360,
+            margin={"l": 24, "r": 16, "t": 48, "b": 36},
+        )
+        return figure
+
+    min_value = float(min(frame["y_true"].min(), frame["y_pred"].min()))
+    max_value = float(max(frame["y_true"].max(), frame["y_pred"].max()))
+    figure.add_trace(
+        go.Scatter(
+            x=frame["y_true"],
+            y=frame["y_pred"],
+            mode="markers",
+            marker={"size": 10, "color": "#00bfe8", "line": {"width": 1, "color": "rgba(255,255,255,0.22)"}},
+            customdata=frame[["residual"]] if "residual" in frame.columns else None,
+            hovertemplate="真实值=%{x:.3f}<br>预测值=%{y:.3f}<br>残差=%{customdata[0]:.3f}<extra></extra>",
+            name="Holdout 样本",
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=[min_value, max_value],
+            y=[min_value, max_value],
+            mode="lines",
+            line={"dash": "dash", "color": "rgba(255,255,255,0.45)"},
+            name="理想预测线",
+            hoverinfo="skip",
+        )
+    )
+    figure.update_layout(
+        title="回归预测对照",
+        template=theme,
+        height=360,
+        margin={"l": 24, "r": 16, "t": 48, "b": 36},
+        xaxis={"title": "真实值"},
+        yaxis={"title": "预测值"},
+    )
+    return figure
+
+
+def _render_public_dataset_benchmark_section(theme_name: str = "dark") -> None:
+    with st.expander("pymovements 公共数据集事件检测对照", expanded=False):
+        st.caption("使用 pymovements 公共 toy dataset，对比当前项目事件识别与 pymovements I-VT / I-DT 的 fixation 检测结果。")
+
+        top = st.columns([1.2, 0.8, 0.8], gap="large")
+        dataset_label = top[0].selectbox("公共数据集", options=list(PUBLIC_DATASET_OPTIONS), index=0)
+        recording_index = int(top[1].number_input("recording 索引", min_value=0, value=0, step=1))
+        use_synthetic = top[2].toggle("改用当前合成数据", value=False)
+
+        run_benchmark = st.button("运行事件检测对照实验", key="run-public-dataset-benchmark")
+        if not run_benchmark:
+            st.info("点击按钮后才会加载公共数据集并执行对照实验，避免默认页面初始化过慢。")
+            return
+
+        with st.spinner("正在运行事件检测对照实验..."):
+            try:
+                if use_synthetic:
+                    recording = simulate_gaze_recording(duration_ms=4000, seed=101)
+                    benchmark = run_event_detection_benchmark(
+                        recording,
+                        dataset_name="synthetic_demo",
+                        recording_label="synthetic_demo_0",
+                    )
+                else:
+                    benchmark = _cached_public_dataset_benchmark(
+                        dataset_name=PUBLIC_DATASET_OPTIONS[dataset_label],
+                        recording_index=recording_index,
+                    )
+            except Exception as exc:
+                st.warning(f"公共数据集对照实验运行失败：{exc}")
+                return
+
+        st.markdown("**实验说明**")
+        st.caption(
+            f"当前数据源：{benchmark.dataset_name} / {benchmark.recording_label}。"
+            "对照对象包括本项目原生阈值事件检测、pymovements I-VT 和 pymovements I-DT。"
+        )
+        insight = summarize_event_benchmark(benchmark)
+        st.success(insight.headline)
+        for line in insight.summary_lines:
+            st.caption(line)
+        report_markdown = build_event_benchmark_markdown(benchmark)
+        st.download_button(
+            "下载方法验证 Markdown 报告",
+            data=report_markdown,
+            file_name=f"event-benchmark-{benchmark.dataset_name}-{benchmark.recording_label}.md".replace("\\", "-").replace("/", "-"),
+            mime="text/markdown",
+            key="download-event-benchmark-report",
+        )
+
+        metric_cols = st.columns(3)
+        native_count = int(benchmark.comparison_table.loc[benchmark.comparison_table["method"] == "native_ivt", "fixation_count"].iloc[0])
+        ivt_count = int(benchmark.comparison_table.loc[benchmark.comparison_table["method"] == "pymovements_ivt", "fixation_count"].iloc[0])
+        third_label = "pymovements I-DT 注视数"
+        third_count = int(benchmark.comparison_table.loc[benchmark.comparison_table["method"] == "pymovements_idt", "fixation_count"].iloc[0])
+        if "ground_truth" in benchmark.comparison_table["method"].tolist():
+            third_label = "Ground Truth 注视数"
+            third_count = int(benchmark.comparison_table.loc[benchmark.comparison_table["method"] == "ground_truth", "fixation_count"].iloc[0])
+        metric_cols[0].metric("原生检测注视数", native_count)
+        metric_cols[1].metric("pymovements I-VT 注视数", ivt_count)
+        metric_cols[2].metric(third_label, third_count)
+
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.markdown("**方法摘要对照**")
+            comparison = benchmark.comparison_table.copy()
+            comparison["method"] = comparison["method"].map(
+                {
+                    "ground_truth": "EyeLink Ground Truth",
+                    "native_ivt": "项目原生阈值法",
+                    "pymovements_ivt": "pymovements I-VT",
+                    "pymovements_idt": "pymovements I-DT",
+                }
+            )
+            comparison = comparison.rename(
+                columns={
+                    "method": "方法",
+                    "fixation_count": "注视数",
+                    "fixation_duration_mean_ms": "平均注视时长(ms)",
+                    "fixation_duration_total_ms": "总注视时长(ms)",
+                    "fixation_amplitude_mean": "平均注视幅度",
+                }
+            )
+            _render_panel_table(comparison.round(3), hide_index=True, max_height_px=260)
+
+        with right:
+            st.markdown("**样本级一致性对照**")
+            agreement = benchmark.agreement_table.copy()
+            agreement["comparison"] = agreement["comparison"].map(
+                {
+                    "ground_truth_vs_native": "Ground Truth vs 原生",
+                    "ground_truth_vs_pymovements_ivt": "Ground Truth vs pymovements I-VT",
+                    "ground_truth_vs_pymovements_idt": "Ground Truth vs pymovements I-DT",
+                    "native_vs_pymovements_ivt": "原生 vs pymovements I-VT",
+                    "native_vs_pymovements_idt": "原生 vs pymovements I-DT",
+                    "pymovements_ivt_vs_idt": "pymovements I-VT vs I-DT",
+                }
+            )
+            agreement = agreement.rename(
+                columns={
+                    "comparison": "对照组",
+                    "sample_overlap_ratio": "样本重叠率",
+                    "precision": "精确率",
+                    "recall": "召回率",
+                    "f1": "F1",
+                }
+            )
+            _render_panel_table(agreement.round(3), hide_index=True, max_height_px=260)
 
 
 def _build_statistics_feature_dataset(num_sessions: int, random_state: int) -> pd.DataFrame:
@@ -2013,7 +2560,7 @@ def _render_multimodal_tab(recording: GazeRecording, theme_name: str = "dark") -
     st.caption("默认模态组合：眼动 + 模拟心率信号")
 
     heart_signal, heart_features = synthesize_heart_rate_preview(recording, seed=99)
-    comparison = compare_modalities(num_sessions=32, model_name="random_forest", random_state=42)
+    comparison = _cached_modality_comparison(num_sessions=32, model_name="random_forest", random_state=42)
 
     left, right = st.columns([1.1, 1], gap="large")
     with left:
@@ -2517,6 +3064,11 @@ def _render_portfolio_talking_points() -> None:
         **扩展方向**
         当前界面已经预留了与心率等时间序列对齐的方式，也保留了建模实验入口，后续可以继续接入更多生理或行为信号。
 
+        **方法验证**
+        除了分析链路本身，当前项目还接入了 `pymovements` 公共数据集对照实验，并能从
+        `ToyDatasetEyeLink` 的原始 `.asc` 中解析 `EFIX` 事件作为近似 ground truth。
+        这意味着项目不仅能“做分析”，还能“验证事件检测方法是否可信”，更贴近真实研究工作。
+
         **使用前提**
         默认假设上传文件能映射到 `timestamp/x/y`，并且 gaze 坐标与当前屏幕分辨率处于同一像素坐标系。
         如果是厂商专有导出格式或局部刺激区域，通常还需要补一层字段映射或刺激区域配置。
@@ -2773,8 +3325,20 @@ def _localize_feature_name(name: str) -> str:
         "blink_count": "眨眼次数",
         "blink_rate_hz": "眨眼频率",
         "blink_duration_mean": "眨眼平均时长",
-        "pupil_baseline": "瞳孔基线",
+        "pupil_baseline": "瞳孔基线水平",
         "pupil_change_rate": "瞳孔变化率",
+        "pupil_bc_mean": "基线校正后瞳孔均值",
+        "pupil_bc_std": "基线校正后瞳孔标准差",
+        "pupil_bc_peak": "基线校正后瞳孔峰值",
+        "pupil_bc_q75": "基线校正后瞳孔 75 分位",
+        "pupil_tonic_level": "瞳孔持续性水平",
+        "pupil_phasic_mean": "瞳孔相位性反应均值",
+        "pupil_phasic_peak": "瞳孔相位性反应峰值",
+        "pupil_dilation_latency_ms": "瞳孔扩张潜伏期（ms）",
+        "pupil_blink_ratio": "眨眼样本占比",
+        "pupil_interpolation_ratio": "插值样本占比",
+        "cognitive_load_level": "工作负荷等级",
+        "cognitive_load_score": "工作负荷评分",
         "heart_rate_mean": "心率均值",
         "heart_rate_std": "心率标准差",
         "heart_rate_min": "最低心率",

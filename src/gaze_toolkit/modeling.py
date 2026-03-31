@@ -240,10 +240,11 @@ def _predict_scores(estimator: Any, X_test: pd.DataFrame, task: str) -> np.ndarr
 
 
 def _regression_metrics(y_true: np.ndarray | pd.Series, y_pred: np.ndarray) -> dict[str, float]:
-    rmse = mean_squared_error(y_true, y_pred, squared=False)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = float(np.sqrt(mse))
     return {
         "mae": float(mean_absolute_error(y_true, y_pred)),
-        "rmse": float(rmse),
+        "rmse": rmse,
         "r2": float(r2_score(y_true, y_pred)),
     }
 

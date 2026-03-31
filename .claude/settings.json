@@ -3,7 +3,8 @@
     "allow": [
       "Bash(*)",
       "Skill(update-config)",
-      "Skill(update-config:*)"
+      "Skill(update-config:*)",
+      "Read(//c/Users/17675/Desktop/AI_code/**)"
     ]
   }
 }

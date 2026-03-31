@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from gaze_toolkit.events import compute_velocity, detect_events
+from gaze_toolkit.pupil_preprocess import extract_pupil_load_features, preprocess_pupil_signal
 from gaze_toolkit.types import EyeEvent, GazeRecording
 
 FeatureFn = Callable[[GazeRecording], dict[str, float]]
@@ -23,6 +24,7 @@ def extract_features(
     recording: GazeRecording,
     window_ms: float = 500.0,
     include_complexity: bool = True,
+    include_pupil_load_features: bool = False,
     feature_names: list[str] | None = None,
 ) -> dict[str, float]:
     """Extract a portfolio-friendly baseline feature set."""
@@ -55,6 +57,16 @@ def extract_features(
     else:
         features["pupil_baseline"] = 0.0
         features["pupil_change_rate"] = 0.0
+
+    if include_pupil_load_features:
+        pupil_result = preprocess_pupil_signal(recording, baseline_window_ms=window_ms)
+        features.update(
+            extract_pupil_load_features(
+                recording,
+                pupil_result=pupil_result,
+                window_ms=max(window_ms, 1000.0),
+            )
+        )
 
     registered_names = feature_names or list(_FEATURE_REGISTRY)
     for name in registered_names:
@@ -149,10 +161,15 @@ def approximate_entropy(
 
     def _phi(order: int) -> float:
         vectors = np.array([values[index : index + order] for index in range(len(values) - order + 1)])
-        distances = np.max(np.abs(vectors[:, None] - vectors[None, :]), axis=2)
-        counts = np.mean(distances <= tolerance, axis=0)
-        counts = np.clip(counts, 1e-12, None)
-        return float(np.mean(np.log(counts)))
+        if len(vectors) == 0:
+            return 0.0
+
+        log_counts: list[float] = []
+        for vector in vectors:
+            distances = np.max(np.abs(vectors - vector), axis=1)
+            count = float(np.mean(distances <= tolerance))
+            log_counts.append(float(np.log(max(count, 1e-12))))
+        return float(np.mean(log_counts))
 
     return float(_phi(m) - _phi(m + 1))
 

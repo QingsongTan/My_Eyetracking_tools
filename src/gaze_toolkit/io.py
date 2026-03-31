@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from gaze_toolkit.errors import DataValidationError, UnsupportedFormatError
+from gaze_toolkit.pymovements_adapter import load_with_pymovements
 from gaze_toolkit.types import GazeRecording
 
 LoaderFn = Callable[[Path, float | None, dict[str, str] | None], pd.DataFrame]
@@ -44,6 +45,12 @@ def load(
 
     if source_format in _LOADER_REGISTRY:
         frame = _LOADER_REGISTRY[source_format](source, sampling_rate_hz, column_map)
+    elif source_format in {"pymovements", "pm"}:
+        return load_with_pymovements(
+            source,
+            sampling_rate_hz=sampling_rate_hz,
+            metadata=metadata,
+        )
     elif source_format in {"csv", "tsv", "txt"}:
         frame = _read_tabular(source, sampling_rate_hz, column_map)
     elif source_format == "asc":
@@ -150,9 +157,6 @@ def _normalize_columns(
             )
         interval_ms = 1000.0 / sampling_rate_hz
         normalized["timestamp_ms"] = normalized.index.to_series(dtype="float64") * interval_ms
-
-    if "valid" not in normalized.columns:
-        normalized["valid"] = True
 
     keep_columns = ["timestamp_ms", "x", "y", "pupil", "valid", "marker", "event_label", "label", "trial"]
     available = [column for column in keep_columns if column in normalized.columns]

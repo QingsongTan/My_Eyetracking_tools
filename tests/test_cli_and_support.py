@@ -52,6 +52,26 @@ def test_io_from_frame_and_asc_loading(tmp_path: Path) -> None:
     assert len(loaded.samples) == 3
 
 
+def test_load_infers_valid_from_nan_without_valid_column(tmp_path: Path) -> None:
+    csv_path = tmp_path / "nan_only.csv"
+    frame = pd.DataFrame(
+        {
+            "timestamp_ms": [0.0, 8.3, 16.6],
+            "x": [100.0, 110.0, 120.0],
+            "y": [200.0, 210.0, 220.0],
+            "pupil": [3.1, None, 3.3],
+        }
+    )
+    frame.to_csv(csv_path, index=False)
+
+    recording = load(csv_path)
+
+    assert recording.samples["valid"].tolist() == [True, False, True]
+    assert recording.samples.loc[1, "x"] == 110.0
+    assert recording.samples.loc[1, "y"] == 210.0
+    assert recording.samples.loc[1, "pupil"] != recording.samples.loc[1, "pupil"]
+
+
 def test_from_frame_accepts_nan_coordinates_and_marks_invalid() -> None:
     frame = pd.DataFrame(
         {

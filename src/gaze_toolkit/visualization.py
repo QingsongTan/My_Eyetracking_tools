@@ -24,6 +24,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.colors import sample_colorscale
+from matplotlib import colors as mcolors
 from sklearn.metrics import ConfusionMatrixDisplay
 
 from gaze_toolkit.types import EyeEvent, GazeRecording
@@ -104,6 +106,8 @@ LIGHT_VISUAL_THEME: dict[str, Any] = {
     "feature_bar": "#00bfe8",
 }
 
+DEFAULT_HEATMAP_PALETTE = "neon_focus"
+
 SCANPATH_COLOR_PRESETS: dict[str, list[list[Any]]] = {
     "aurora": [
         [0.0, "#173d7a"],
@@ -132,6 +136,18 @@ SCANPATH_COLOR_PRESETS: dict[str, list[list[Any]]] = {
 }
 
 HEATMAP_COLOR_PRESETS: dict[str, list[list[Any]]] = {
+    "neon_focus": [
+        [0.00, "rgba(20,9,62,0.00)"],
+        [0.08, "rgba(32,13,92,0.12)"],
+        [0.20, "#3121a6"],
+        [0.36, "#2c5dff"],
+        [0.52, "#25d7ff"],
+        [0.66, "#86ffcc"],
+        [0.78, "#e8ff68"],
+        [0.88, "#ffbe45"],
+        [0.96, "#ff7a38"],
+        [1.00, "#ff4f48"],
+    ],
     "aurora": [
         [0.00, "rgba(8,23,45,0.00)"],
         [0.18, "#123d7a"],
@@ -177,6 +193,42 @@ def _resolve_heatmap_colorscale(theme_name: str, palette: str) -> list[list[Any]
     if palette == "theme_default":
         return _visual_theme(theme_name)["heatmap_colorscale"]
     return HEATMAP_COLOR_PRESETS.get(palette, _visual_theme(theme_name)["heatmap_colorscale"])
+
+
+def _parse_plotly_color(color: Any) -> tuple[float, float, float, float]:
+    """Convert Plotly/CSS-style colors into Matplotlib RGBA tuples."""
+    if isinstance(color, (tuple, list)) and 3 <= len(color) <= 4:
+        rgba = list(color)
+        if len(rgba) == 3:
+            rgba.append(1.0)
+        return tuple(float(channel) for channel in rgba)
+
+    if not isinstance(color, str):
+        return mcolors.to_rgba(color)
+
+    normalized = color.strip()
+    if normalized.startswith("rgba(") and normalized.endswith(")"):
+        channels = [part.strip() for part in normalized[5:-1].split(",")]
+        if len(channels) != 4:
+            raise ValueError(f"Invalid rgba color: {color!r}")
+        red, green, blue = (float(channel) / 255.0 for channel in channels[:3])
+        alpha = float(channels[3])
+        return red, green, blue, alpha
+    if normalized.startswith("rgb(") and normalized.endswith(")"):
+        channels = [part.strip() for part in normalized[4:-1].split(",")]
+        if len(channels) != 3:
+            raise ValueError(f"Invalid rgb color: {color!r}")
+        red, green, blue = (float(channel) / 255.0 for channel in channels)
+        return red, green, blue, 1.0
+    return mcolors.to_rgba(normalized)
+
+
+def _resolve_heatmap_matplotlib_cmap(theme_name: str, palette: str) -> mcolors.LinearSegmentedColormap:
+    """Build a Matplotlib colormap from the active heatmap palette."""
+    colorscale = _resolve_heatmap_colorscale(theme_name, palette)
+    stops = [(float(position), _parse_plotly_color(color)) for position, color in colorscale]
+    cmap_name = f"heatmap-{theme_name}-{palette}"
+    return mcolors.LinearSegmentedColormap.from_list(cmap_name, stops)
 
 
 def _apply_matplotlib_panel_style(
@@ -256,13 +308,14 @@ def plot_heatmap(
     bins: int = 40,
     ax: Any | None = None,
     theme_name: str = "dark",
+    palette: str = DEFAULT_HEATMAP_PALETTE,
 ) -> Any:
     """Plot a gaze density heatmap using Matplotlib."""
     theme = _visual_theme(theme_name)
     frame = _valid_frame(recording)
     ax = ax or plt.subplots(figsize=(8, 5))[1]
     ax.set_facecolor(theme["panel_bg"])
-    heat = ax.hist2d(frame["x"], frame["y"], bins=bins, cmap="magma")
+    heat = ax.hist2d(frame["x"], frame["y"], bins=bins, cmap=_resolve_heatmap_matplotlib_cmap(theme_name, palette))
     colorbar = plt.colorbar(heat[3], ax=ax)
     _style_matplotlib_colorbar(colorbar, theme, label="密度")
     ax.set_title("核密度注意力热力图")
@@ -413,7 +466,7 @@ def plot_interactive_heatmap(
     bins: int = 140,
     figure_height: int = 420,
     theme_name: str = "dark",
-    palette: str = "theme_default",
+    palette: str = DEFAULT_HEATMAP_PALETTE,
     heatmap_opacity: float = 0.62,
 ) -> go.Figure:
     """Plot a smoothed density heatmap with a dark interactive style."""
@@ -536,13 +589,15 @@ def plot_interactive_heatmap(
     return figure
 
 
+
+
 def plot_image_saliency_heatmap(
     saliency_map: np.ndarray,
     background_image: str | Path | Any | None = None,
     screen_size: tuple[int, int] | None = None,
     figure_height: int = 420,
     theme_name: str = "dark",
-    palette: str = "theme_default",
+    palette: str = DEFAULT_HEATMAP_PALETTE,
     heatmap_opacity: float = 0.62,
     title: str = "图片快速显著性热力图 (OpenCV Fast Saliency)",
 ) -> go.Figure:
@@ -886,7 +941,18 @@ def _load_background_image(background_image: str | Path | Any | None) -> str | N
     except ModuleNotFoundError:
         return None
 
-    if isinstance(background_image, (str, Path)):
+    if isinstance(background_image, np.ndarray):
+        image_array = np.asarray(background_image)
+        if image_array.dtype != np.uint8:
+            max_value = float(np.nanmax(image_array)) if image_array.size else 0.0
+            clipped = np.nan_to_num(image_array, nan=0.0)
+            if max_value <= 1.0:
+                clipped = np.clip(clipped, 0.0, 1.0) * 255.0
+            else:
+                clipped = np.clip(clipped, 0.0, 255.0)
+            image_array = clipped.round().astype("uint8")
+        image = pil_image.fromarray(image_array)
+    elif isinstance(background_image, (str, Path)):
         image = pil_image.open(Path(background_image))
     else:
         if hasattr(background_image, "seek"):

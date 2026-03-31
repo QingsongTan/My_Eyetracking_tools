@@ -41,9 +41,12 @@ class GazeRecording:
     metadata: dict[str, Any] = field(default_factory=dict)
     source_format: str = "csv"
     events: list[EyeEvent] = field(default_factory=list)
+    original_columns: tuple[str, ...] = field(default_factory=tuple, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.samples = self.samples.copy()
+        if not self.original_columns:
+            self.original_columns = tuple(self.samples.columns)
         self.validate()
 
     def validate(self) -> None:
@@ -53,6 +56,7 @@ class GazeRecording:
             raise DataValidationError(f"Missing required columns: {missing}")
 
         normalized = self.samples.sort_values("timestamp_ms").reset_index(drop=True)
+        has_pupil_column = "pupil" in self.original_columns
 
         for column in REQUIRED_COLUMNS:
             normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
@@ -60,20 +64,25 @@ class GazeRecording:
         if normalized["timestamp_ms"].isna().any():
             raise DataValidationError("All samples must contain a valid timestamp.")
 
-        coordinate_mask = normalized[["x", "y"]].notna().all(axis=1)
-        if "valid" not in normalized.columns:
-            normalized["valid"] = coordinate_mask
-        else:
-            normalized["valid"] = _coerce_valid_column(normalized["valid"]) & coordinate_mask
+        if has_pupil_column:
+            normalized["pupil"] = pd.to_numeric(normalized["pupil"], errors="coerce")
 
-        valid_subset = normalized.loc[normalized["valid"], ["x", "y"]]
+        valid_mask = normalized[["x", "y"]].notna().all(axis=1)
+        if has_pupil_column:
+            valid_mask = valid_mask & normalized["pupil"].notna()
+
+        if "valid" not in normalized.columns:
+            normalized["valid"] = valid_mask
+        else:
+            normalized["valid"] = _coerce_valid_column(normalized["valid"]) & valid_mask
+
+        valid_columns = ["x", "y"] + (["pupil"] if has_pupil_column else [])
+        valid_subset = normalized.loc[normalized["valid"], valid_columns]
         if valid_subset.isna().any().any():
-            raise DataValidationError("Valid samples must contain numeric x/y coordinates.")
+            raise DataValidationError("Valid samples must contain numeric x/y coordinates and pupil values when present.")
 
         if "pupil" not in normalized.columns:
             normalized["pupil"] = np.nan
-        else:
-            normalized["pupil"] = pd.to_numeric(normalized["pupil"], errors="coerce")
 
         for column in ("marker", "event_label", "label", "trial"):
             if column not in normalized.columns:
@@ -96,6 +105,7 @@ class GazeRecording:
             metadata=dict(self.metadata),
             source_format=self.source_format,
             events=list(self.events),
+            original_columns=self.original_columns,
         )
 
     def with_events(self, events: list[EyeEvent]) -> GazeRecording:

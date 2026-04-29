@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from gaze_toolkit.quality import compute_quality_grade as compute_quality_grade
 from gaze_toolkit.types import GazeRecording
 
 FIXATION_TABLE_COLUMNS = [
@@ -43,16 +44,3 @@ def fixation_table(recording: GazeRecording) -> pd.DataFrame:
         )
 
     return pd.DataFrame(rows, columns=FIXATION_TABLE_COLUMNS)
-
-
-def compute_quality_grade(recording: GazeRecording) -> str:
-    """基于 tracking ratio 计算基础质量等级。"""
-    tracking_ratio = float(recording.samples["valid"].mean()) if not recording.samples.empty else 0.0
-
-    if tracking_ratio >= 0.9:
-        return "优"
-    if tracking_ratio >= 0.75:
-        return "良"
-    if tracking_ratio >= 0.5:
-        return "可用"
-    return "建议剔除"

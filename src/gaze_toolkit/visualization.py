@@ -599,6 +599,7 @@ def plot_image_saliency_heatmap(
     theme_name: str = "dark",
     palette: str = DEFAULT_HEATMAP_PALETTE,
     heatmap_opacity: float = 0.62,
+    preserve_aspect_ratio: bool = False,
     title: str = "图片快速显著性热力图 (OpenCV Fast Saliency)",
 ) -> go.Figure:
     """Render an image-derived saliency map as an interactive heatmap."""
@@ -615,6 +616,22 @@ def plot_image_saliency_heatmap(
     plot_size = screen_size or (map_width, map_height)
     x_range = [0.0, float(plot_size[0])]
     y_range = [float(plot_size[1]), 0.0]
+    xaxis_config = {
+        "title": "Screen X",
+        "gridcolor": theme["panel_grid"],
+        "zeroline": False,
+        "showline": False,
+        "range": x_range,
+    }
+    yaxis_config = {
+        "title": "Screen Y",
+        "showgrid": False,
+        "zeroline": False,
+        "showline": False,
+        "range": y_range,
+    }
+    if preserve_aspect_ratio:
+        yaxis_config.update({"scaleanchor": "x", "scaleratio": 1, "constrain": "domain"})
 
     if not np.any(density > 0):
         _attach_background_image(figure, background=background, x_range=x_range, y_range=y_range, opacity=0.82)
@@ -626,20 +643,8 @@ def plot_image_saliency_heatmap(
             plot_bgcolor=theme["heatmap_bg_overlay"] if background is not None else theme["panel_bg"],
             margin={"l": 28, "r": 20, "t": 50, "b": 30},
             font={"color": theme["panel_text"], "family": "Aptos, Microsoft YaHei, sans-serif"},
-            xaxis={
-                "title": "Screen X",
-                "gridcolor": theme["panel_grid"],
-                "zeroline": False,
-                "showline": False,
-                "range": x_range,
-            },
-            yaxis={
-                "title": "Screen Y",
-                "showgrid": False,
-                "zeroline": False,
-                "showline": False,
-                "range": y_range,
-            },
+            xaxis=xaxis_config,
+            yaxis=yaxis_config,
         )
         _add_empty_state_annotation(figure, "当前图片没有生成可用的显著性密度图", theme_name=theme_name)
         return figure
@@ -674,20 +679,8 @@ def plot_image_saliency_heatmap(
         plot_bgcolor=theme["heatmap_bg_overlay"] if background is not None else theme["panel_bg"],
         margin={"l": 28, "r": 20, "t": 50, "b": 30},
         font={"color": theme["panel_text"], "family": "Aptos, Microsoft YaHei, sans-serif"},
-        xaxis={
-            "title": "Screen X",
-            "gridcolor": theme["panel_grid"],
-            "zeroline": False,
-            "showline": False,
-            "range": x_range,
-        },
-        yaxis={
-            "title": "Screen Y",
-            "showgrid": False,
-            "zeroline": False,
-            "showline": False,
-            "range": y_range,
-        },
+        xaxis=xaxis_config,
+        yaxis=yaxis_config,
     )
     return figure
 

@@ -62,6 +62,30 @@ def test_plot_image_saliency_heatmap_supports_background_and_opacity(tmp_path) -
     assert list(figure.layout.yaxis.range) == [540.0, 0.0]
 
 
+def test_plot_image_saliency_heatmap_preserves_aspect_ratio_for_original_image_mode(tmp_path) -> None:
+    background = np.zeros((48, 72, 3), dtype=float)
+    background[..., 2] = 0.80
+    background_path = tmp_path / "stimulus_original_size.png"
+    plt.imsave(background_path, background)
+
+    result = predict_image_attention((background * 255).astype(np.uint8), backend=FAST_SALIENCY_BACKEND)
+    figure = plot_image_saliency_heatmap(
+        result.saliency_map,
+        background_image=background_path,
+        screen_size=(72, 48),
+        theme_name="light",
+        palette="sunset",
+        heatmap_opacity=0.44,
+        preserve_aspect_ratio=True,
+    )
+
+    assert list(figure.layout.xaxis.range) == [0.0, 72.0]
+    assert list(figure.layout.yaxis.range) == [48.0, 0.0]
+    assert figure.layout.yaxis.scaleanchor == "x"
+    assert figure.layout.yaxis.scaleratio == 1
+    assert figure.layout.yaxis.constrain == "domain"
+
+
 def test_list_saliency_backends_marks_deepgaze_available_when_runtime_exists(monkeypatch, tmp_path) -> None:
     runtime_python = tmp_path / "python.exe"
     runtime_python.write_text("", encoding="utf-8")

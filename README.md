@@ -1,98 +1,40 @@
-# Human Factors AI Lab
+# gaze-toolkit · 多模态认知状态感知平台
 
-`gaze-toolkit` 是一个面向终端产品体验研究的 AI 驱动人因分析平台原型。它以眼动数据为核心，扩展生理与行为多模态接口，用来把原始时序数据转成可解释的人因指标、状态/意图预测结果和可视化研究展示。
+面向移动 / 穿戴产品的 AI 驱动人因分析平台原型。以眼动数据为核心，融合生理多模态信号，输出可解释的认知状态推断与 UX 改进建议。
 
-这个项目不是单纯的眼动可视化脚本，也不是追求大而全的商用平台，而是一个围绕人因研究流程构建的最小完整闭环，重点展示心理学研究训练、人因问题拆解、Python 数据分析与 AI 驱动多模态分析的综合能力链。
-
-## 这个项目要证明什么
-
-这个项目重点证明下面这条能力链：
-
-- 能把终端体验问题拆成可测量的人因变量与研究指标。
-- 能把眼动数据转成事件、特征和可建模的数据表。
-- 能用 AI 方法完成状态/意图建模、多模态融合和注意分布建模。
-- 能把研究逻辑封装成可复用、可演示、可扩展的工具系统。
-
-## 当前 MVP 范围
-
-输入：
-
-- `CSV` 文件
-- 基础 `EyeLink .asc`
-- 内置模拟眼动数据
-- 内置模拟心率信号，用于默认多模态演示
-
-处理流程：
-
-1. 数据标准化加载
-2. 缺失值插值
-3. 平滑滤波
-4. 坐标归一化
-5. I-VT 事件检测
-6. 特征提取
-7. 基线意图分类
-8. 多模态融合对比
-9. 可视化展示与交互操作
-
-输出：
-
-- 扫描路径图
-- 热力图
-- 信号时序总览
-- 事件表
-- 特征摘要
-- 分类指标
-- 混淆矩阵
-- 特征重要性
-- 眼动 vs 眼动+心率 基线对比
-
-## 为什么这版设计适合作品集
-
-它故意没有把所有研究级复杂性都一次性塞进去，而是优先保证一条完整、可信、能运行的闭环。对于面试展示，这比堆很多未闭环的“计划能力”更有效。
-
-默认保留的假设：
-
-- 演示主要在本地运行。
-- 面试演示以 `CSV` 和模拟数据为主。
-- 第二模态默认用心率做轻量演示，后续可替换为 EDA、EEG、鼠标轨迹、键盘行为等。
-
-当前未默认打包但已保留扩展点：
-
-- `EDF` 原生解析
-- SHAP / LIME 完整解释链路
-- LSTM / TCN / Transformer 深度时序模型
-- 在线流式真实接入
-
-## 项目结构
+## 分析链
 
 ```text
-configs/
-docs/plans/
-examples/
-notebooks/
-src/gaze_toolkit/
-tests/
+产品界面截图
+    ↓ [基线层]  物理显著性（OpenCV）+ DeepGaze → 注意力基线地图
+    ↓ [采集层]  眼动信号（CSV / EyeLink）+ 心率等生理数据
+    ↓ [特征层]  注视 / 扫视 / 瞳孔 / 眨眼特征（40+ 维）
+    ↓ [AI 层]   认知负荷估计 + 意图预测 + LLM 特征异常解读
+    ↓ [洞察层]  认知状态假说 + UX 改进建议
 ```
 
-## 快速开始
+## 功能模块
 
-安装：
+| 分析链层 | 模块 | 说明 |
+| --- | --- | --- |
+| 基线层 | 物理显著性 + DeepGaze | 产品截图 → 注意力基线地图，无需眼动数据 |
+| 采集层 | 眼动 + 心率多模态 | CSV / EyeLink 接入，采样率 30–1000 Hz |
+| 特征层 | 注视 / 扫视 / 瞳孔 / 眨眼 | 40+ 维特征，AOI 兴趣区联动分析 |
+| AI 层 | 认知负荷 + 意图预测 | RF / GBDT / SVM + LLM 特征异常解读 |
+| 洞察层 | 报告生成 + UX 建议 | 认知状态假说 + 可操作界面改进建议 |
+| 批量层 | 多文件批量分析 | 跨会话对比 + 统计检验 + 效应量估计 |
+
+## 快速开始
 
 ```bash
 pip install -e .
 pip install -e .[dashboard]
 ```
 
-如果你要启用基于 PyTorch + PySaliency + DeepGaze 的认知显著性后端，推荐直接运行仓库内的一键脚本：
+启用 DeepGaze 认知显著性后端（可选）：
 
 ```powershell
 scripts\setup-deepgaze-runtime.cmd
-```
-
-如果你希望安装后顺手把完整 DeepGaze 推理链路也验掉，可以加上：
-
-```powershell
-scripts\setup-deepgaze-runtime.cmd -RunFullValidation
 ```
 
 命令行演示：
@@ -103,105 +45,107 @@ gaze-toolkit features --input demo.csv
 gaze-toolkit train-demo --sessions 24
 ```
 
-启动可视化研究界面：
+启动 Dashboard：
 
 ```bash
 gaze-toolkit-ui
-```
-
-如果你更习惯直接用 Streamlit：
-
-```bash
+# 或
 streamlit run src/gaze_toolkit/dashboard.py
 ```
 
-## 典型作品集演示路径
+## 典型演示路径
 
-### 1. 单条眼动记录分析
+### 1. 三层注意力分析
 
-- 上传 `CSV`
-- 调整平滑窗口、扫视阈值、最小注视时长
-- 查看扫描路径、热力图、信号曲线、事件表和关键特征
+上传产品界面截图，在 Dashboard 侧边栏勾选任意层组合叠加显示：
 
-### 2. 阅读意图基线建模
+- **物理显著性**：用户应该看哪里（底层视觉吸引力）
+- **DeepGaze 预测**：人类注视先验预测（认知期望）
+- **真实眼动热力图**：用户实际看了哪里（真实观测）
 
-- 生成模拟的 `careful vs skim` 数据集
-- 训练随机森林 / SVM / 梯度提升模型
-- 展示准确率、F1、混淆矩阵、特征重要性
+三层偏差 = 界面设计优化的直接证据。
 
-### 3. 多模态扩展能力展示
+### 2. LLM 特征异常解读
 
-- 在同一界面展示心率信号
-- 比较眼动单模态与眼动+心率多模态结果
-- 说明这条架构如何扩展到真实人因研究中的更多传感器
+在「单次会话分析」Tab 底部，自动检测眼动特征异常（warning / critical 双级），
+可选接入 LLM 生成认知状态假说和 UX 建议。
 
-### 4. 研究方法验证展示
+### 3. 认知负荷分类
 
-- 在 `意图建模实验台` 中运行 `pymovements` 公共数据集事件检测对照实验
-- 使用 `ToyDatasetEyeLink` 的原始 EyeLink `.asc` 事件作为近似 ground truth
-- 对比：
-  - 项目原生阈值法
-  - `pymovements I-VT`
-  - `pymovements I-DT`
-- 自动生成方法学结论摘要与 Markdown 报告
+```python
+from gaze_toolkit.cognitive_load import simulate_cognitive_load_dataset, run_cognitive_load_experiment
 
-这部分不是单纯展示“算法能跑”，而是展示：
+df = simulate_cognitive_load_dataset(num_sessions=80)
+report = run_cognitive_load_experiment(df, target="style", task="classification")
+print(report.result.metrics)
+```
 
-- 能接公共数据集
-- 能读取原始 EyeLink 事件
-- 能做跨工具方法对照
-- 能把结果沉淀成可解释、可分享的研究结论
+参见 [notebooks/07-真实数据集认知负荷预测.ipynb](notebooks/07-真实数据集认知负荷预测.ipynb)：
 
-这对人因工程与用户体验研究岗位尤其重要，因为它更接近真实研究工作里的“方法验证”和“信度讨论”。
+- EyeLink 真实数据管线验证：LogisticRegression 70% 准确率
+- 80 被试双条件 LOO 交叉验证：RandomForest 100% 准确率
+- 扩展到 GazeBase（322 名被试）的完整代码模板
+
+### 4. 多模态扩展
+
+```python
+from gaze_toolkit import compare_modalities
+comparison = compare_modalities(num_sessions=32)
+```
+
+### 5. 研究方法验证
+
+在「意图建模实验台」Tab 使用 pymovements ToyDataset 对照：
+原生阈值法 vs pymovements I-VT vs I-DT，自动生成 Markdown 方法论摘要。
 
 ## 核心 API
 
 ```python
-from gaze_toolkit import analyze_recording, compare_modalities, run_intent_experiment
+from gaze_toolkit import analyze_recording
 from gaze_toolkit.datasets import simulate_gaze_recording
+from gaze_toolkit.report_generator import explain_feature_anomalies, generate_insight_report
 
 recording = simulate_gaze_recording(style="careful", seed=42)
 analysis = analyze_recording(recording)
 
-report = run_intent_experiment(num_sessions=32, model_name="random_forest")
-comparison = compare_modalities(num_sessions=32)
+# LLM 特征异常解读
+explanation = explain_feature_anomalies(analysis.features, use_llm=False)
+print(explanation.cognitive_state_hypothesis)
+
+# 生成洞察报告（含异常解读 section）
+report = generate_insight_report(analysis.features, explain_anomalies=True)
 ```
 
-## 示例与教程
+## 教程 Notebook
 
-示例脚本：
+| # | 主题 |
+| --- | --- |
+| 01 | 数据加载与预处理 |
+| 02 | 特征提取与探索 |
+| 03 | 构建意图分类器（传统方法） |
+| 04 | 深度学习时序建模 |
+| 05 | 多模态融合示例（眼动+心率） |
+| 06 | 模型解释与可视化 |
+| 07 | **真实数据集认知负荷预测**（new） |
 
-- [examples/demo_pipeline.py](examples/demo_pipeline.py)
-- [examples/demo_multimodal.py](examples/demo_multimodal.py)
-- [examples/demo_event_benchmark.py](examples/demo_event_benchmark.py)
+## 项目结构
 
-教程 notebook：
+```text
+src/gaze_toolkit/      核心模块（pipeline / features / cognitive_load / report_generator / dashboard）
+notebooks/             7 个教程 notebook
+tests/                 128 个单元测试（pytest）
+examples/              演示脚本
+scripts/               环境搭建脚本（DeepGaze runtime）
+```
 
-- [notebooks/01-数据加载与预处理.ipynb](notebooks/01-数据加载与预处理.ipynb)
-- [notebooks/02-特征提取与探索.ipynb](notebooks/02-特征提取与探索.ipynb)
-- [notebooks/03-构建意图分类器（传统方法）.ipynb](notebooks/03-构建意图分类器（传统方法）.ipynb)
-- [notebooks/04-使用深度学习进行时序建模.ipynb](notebooks/04-使用深度学习进行时序建模.ipynb)
-- [notebooks/05-多模态融合示例（眼动+心率）.ipynb](notebooks/05-多模态融合示例（眼动+心率）.ipynb)
-- [notebooks/06-模型解释与可视化.ipynb](notebooks/06-模型解释与可视化.ipynb)
-
-## 验证建议
+## 运行测试
 
 ```bash
 pytest
 ```
 
-如果你想单独验证公共数据集事件检测对照链路：
+## 注意事项
 
-```bash
-python examples/demo_event_benchmark.py
-```
-
-更多作品集表达建议见：
-
-- [docs/method-validation-showcase.md](docs/method-validation-showcase.md)
-
-## 未验证前提
-
-- 真实厂商导出数据的字段名可能与默认列映射不同，此时需要传入 `column_map` 或补一个定制 loader。
-- 本仓库默认多模态演示中的心率信号是模拟数据，不应被表述为真实实验结果。
-- 当前意图分类任务是用于展示建模与工程能力的可运行基线，不应直接替代正式研究结论。
+- 心率信号为模拟数据，不作为真实实验结论引用。
+- 认知负荷分类结果为方法展示，不替代正式研究结论。
+- 真实厂商设备导出数据字段名可能不同，需传入 `column_map` 适配。

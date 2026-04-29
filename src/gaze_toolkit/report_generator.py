@@ -11,12 +11,103 @@ from typing import Any
 from gaze_toolkit.aoi import AOIMetrics
 from gaze_toolkit.statistics import StatTestResult
 
+
+@dataclass
+class FeatureAnomaly:
+    """单个特征的异常记录。"""
+
+    feature: str
+    value: float
+    direction: str      # "high" | "low"
+    severity: str       # "warning" | "critical"
+    threshold_ref: str  # 人类可读的阈值说明
+
+
+@dataclass
+class FeatureAnomalyExplanation:
+    """LLM 或规则引擎对特征异常的完整解读。"""
+
+    anomalies: list[FeatureAnomaly]
+    cognitive_state_hypothesis: str
+    ux_recommendations: list[str]
+    explanation_mode: str   # "llm" | "rule_based"
+    model_used: str | None
+
+
 _THRESHOLDS = {
-    "fixation_duration_mean": {"low": 150, "high": 400},
-    "blink_rate_hz": {"low": 0.1, "high": 0.4},
-    "valid_ratio": {"poor": 0.5, "good": 0.9},
-    "saccade_amplitude_mean": {"low": 2.0, "high": 8.0},
+    "fixation_duration_mean": {
+        "critical_low": 80, "low": 150, "high": 400, "critical_high": 600,
+        "unit": "ms", "desc": "正常范围 150–400 ms",
+    },
+    "blink_rate_hz": {
+        "low": 0.1, "high": 0.4, "critical_high": 0.6,
+        "unit": "Hz", "desc": "正常范围 0.1–0.4 Hz",
+    },
+    "valid_ratio": {
+        "poor": 0.5, "critical_low": 0.5, "low": 0.75, "good": 0.9,
+        "unit": "", "desc": "建议 ≥ 0.75",
+    },
+    "saccade_amplitude_mean": {
+        "low": 2.0, "high": 8.0, "critical_high": 12.0,
+        "unit": "°", "desc": "正常范围 2–8°",
+    },
+    "fixation_count": {
+        "critical_low": 3, "low": 5, "high": 100,
+        "unit": "次", "desc": "正常范围 5–100 次",
+    },
+    "saccade_count": {
+        "low": 2, "high": 80,
+        "unit": "次", "desc": "正常范围 2–80 次",
+    },
+    "pupil_change_rate": {
+        "high": 0.3, "critical_high": 0.5,
+        "unit": "", "desc": "正常 < 0.3",
+    },
+    "blink_duration_mean": {
+        "high": 400, "critical_high": 600,
+        "unit": "ms", "desc": "正常 < 400 ms",
+    },
 }
+
+
+def _detect_feature_anomalies(features: dict[str, float]) -> list[FeatureAnomaly]:
+    """规则引擎：检测偏离正常阈值的特征，返回异常列表。"""
+    anomalies: list[FeatureAnomaly] = []
+    for feat, value in features.items():
+        spec = _THRESHOLDS.get(feat)
+        if spec is None:
+            continue
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            continue
+
+        direction: str | None = None
+        severity: str | None = None
+
+        if "critical_low" in spec and val < spec["critical_low"]:
+            direction, severity = "low", "critical"
+        elif "low" in spec and val < spec["low"]:
+            direction, severity = "low", "warning"
+        elif "critical_high" in spec and val > spec["critical_high"]:
+            direction, severity = "high", "critical"
+        elif "high" in spec and val > spec["high"]:
+            direction, severity = "high", "warning"
+
+        if direction is not None and severity is not None:
+            unit = spec.get("unit", "")
+            desc = spec.get("desc", "")
+            threshold_ref = f"{desc}，实测 {val:.2f}{unit}"
+            anomalies.append(
+                FeatureAnomaly(
+                    feature=feat,
+                    value=val,
+                    direction=direction,
+                    severity=severity,
+                    threshold_ref=threshold_ref,
+                )
+            )
+    return anomalies
 
 _TITLE_MAP = {
     "zh": "眼动分析洞察报告",
@@ -122,6 +213,108 @@ class InsightReport:
         }
 
 
+def explain_feature_anomalies(
+    features: dict[str, float],
+    *,
+    context: dict[str, Any] | None = None,
+    use_llm: bool = False,
+    llm_backend: str = "openai",
+    llm_model: str = "gpt-4o-mini",
+    api_key: str | None = None,
+) -> FeatureAnomalyExplanation:
+    """
+    分析特征向量，返回异常解读与认知状态假说。
+
+    use_llm=False 时走规则引擎，不触发任何网络请求。
+    LLM 调用失败时自动降级到规则引擎，不抛异常。
+    """
+    anomalies = _detect_feature_anomalies(features)
+
+    if not use_llm:
+        return _rule_based_explanation(anomalies)
+
+    prompt = _build_anomaly_prompt(features, anomalies, context)
+    try:
+        raw = _call_llm(
+            prompt,
+            backend=llm_backend,
+            model=llm_model,
+            api_key=api_key,
+            max_tokens=800,
+        )
+        parsed = json.loads(raw.strip())
+        return FeatureAnomalyExplanation(
+            anomalies=anomalies,
+            cognitive_state_hypothesis=str(parsed.get("cognitive_state", "")),
+            ux_recommendations=list(parsed.get("ux_recommendations", [])),
+            explanation_mode="llm",
+            model_used=llm_model,
+        )
+    except Exception:
+        return _rule_based_explanation(anomalies)
+
+
+def _rule_based_explanation(anomalies: list[FeatureAnomaly]) -> FeatureAnomalyExplanation:
+    """规则引擎降级：根据异常类型生成模板化解读。"""
+    if not anomalies:
+        return FeatureAnomalyExplanation(
+            anomalies=[],
+            cognitive_state_hypothesis="各项眼动指标处于正常范围，未检测到明显异常。",
+            ux_recommendations=[],
+            explanation_mode="rule_based",
+            model_used=None,
+        )
+
+    critical = [a for a in anomalies if a.severity == "critical"]
+    warnings = [a for a in anomalies if a.severity == "warning"]
+
+    hypothesis_parts: list[str] = []
+    recommendations: list[str] = []
+
+    for a in anomalies:
+        if a.feature == "fixation_duration_mean":
+            if a.direction == "low":
+                hypothesis_parts.append("注视时长过短，可能存在浏览式扫读或注意力分散")
+                recommendations.append("检查界面信息密度，考虑减少单屏内容量")
+            else:
+                hypothesis_parts.append("注视时长过长，可能存在认知困惑或信息处理负荷高")
+                recommendations.append("简化当前界面元素的视觉复杂度")
+        elif a.feature == "blink_rate_hz":
+            if a.direction == "high":
+                hypothesis_parts.append("眨眼频率偏高，提示疲劳或认知负荷较大")
+                recommendations.append("考虑增加任务间隔或降低视觉刺激强度")
+            else:
+                hypothesis_parts.append("眨眼频率偏低，用户高度专注或存在视觉搜索困难")
+        elif a.feature == "valid_ratio":
+            hypothesis_parts.append("有效追踪率不足，数据可信度降低")
+            recommendations.append("检查眼动仪标定质量，确认用户坐姿与距离")
+        elif a.feature == "saccade_amplitude_mean":
+            if a.direction == "high":
+                hypothesis_parts.append("扫视幅度偏大，注意力在界面大范围跳跃")
+                recommendations.append("优化视觉引导路径，减少跨区域跳转")
+            else:
+                hypothesis_parts.append("扫视幅度偏小，注意力局限在局部区域")
+        elif a.feature == "pupil_change_rate":
+            hypothesis_parts.append("瞳孔变化率异常，认知负荷可能较高")
+            recommendations.append("考虑拆分当前任务步骤，降低单步认知压力")
+        elif a.feature == "fixation_count":
+            if a.direction == "low":
+                hypothesis_parts.append("注视次数过少，用户可能快速跳过或放弃探索")
+                recommendations.append("检查关键功能入口的视觉显著性")
+
+    severity_label = "存在严重异常指标" if critical else "存在轻度异常指标"
+    anomaly_names = "、".join(a.feature for a in anomalies)
+    hypothesis = f"{severity_label}（{anomaly_names}）。" + "；".join(hypothesis_parts) + "。"
+
+    return FeatureAnomalyExplanation(
+        anomalies=anomalies,
+        cognitive_state_hypothesis=hypothesis,
+        ux_recommendations=recommendations,
+        explanation_mode="rule_based",
+        model_used=None,
+    )
+
+
 def generate_insight_report(
     feature_data: dict[str, float],
     *,
@@ -130,6 +323,7 @@ def generate_insight_report(
     aoi_metrics: dict[str, AOIMetrics] | None = None,
     quality_grade: str | None = None,
     use_llm: bool = False,
+    explain_anomalies: bool = False,
     llm_backend: str = "openai",
     llm_model: str = "gpt-4o-mini",
     api_key: str | None = None,
@@ -139,7 +333,9 @@ def generate_insight_report(
     """
     基于分析结果生成人因研究洞察报告。
 
-    默认输出纯模板报告；启用 LLM 模式后，会在模板报告基础上追加自由文本洞察。
+    explain_anomalies=True 时，在 features 摘要后插入特征异常解读 section。
+    use_llm=True 时，在报告末尾追加 LLM 自由文本洞察。
+    两个开关独立，均默认 False，不破坏现有调用。
     """
     lang = _normalize_language(language)
     template_report = _build_template_report(
@@ -150,8 +346,35 @@ def generate_insight_report(
         quality_grade=quality_grade,
         language=lang,
     )
+
+    extra_sections: list[ReportSection] = []
+
+    if explain_anomalies:
+        explanation = explain_feature_anomalies(
+            feature_data,
+            context=scenario_context,
+            use_llm=use_llm,
+            llm_backend=llm_backend,
+            llm_model=llm_model,
+            api_key=api_key,
+        )
+        anomaly_body = _format_anomaly_explanation(explanation, lang)
+        extra_sections.append(
+            ReportSection(
+                heading="认知状态异常解读" if lang == "zh" else "Cognitive State Analysis",
+                body=anomaly_body,
+                section_type="anomaly_explanation",
+            )
+        )
+
     if not use_llm:
-        return template_report
+        return InsightReport(
+            title=template_report.title,
+            sections=[*template_report.sections, *extra_sections],
+            generated_at=template_report.generated_at,
+            mode=template_report.mode,
+            llm_model=template_report.llm_model,
+        )
 
     prompt = _build_llm_prompt(
         template_report=template_report,
@@ -179,7 +402,7 @@ def generate_insight_report(
         )
         return InsightReport(
             title=template_report.title,
-            sections=[*template_report.sections, failure_section],
+            sections=[*template_report.sections, *extra_sections, failure_section],
             generated_at=template_report.generated_at,
             mode="template",
             llm_model=None,
@@ -192,7 +415,7 @@ def generate_insight_report(
     )
     return InsightReport(
         title=template_report.title,
-        sections=[*template_report.sections, llm_section],
+        sections=[*template_report.sections, *extra_sections, llm_section],
         generated_at=template_report.generated_at,
         mode="llm",
         llm_model=llm_model,
@@ -581,6 +804,56 @@ def _build_llm_prompt(
     )
 
 
+def _build_anomaly_prompt(
+    features: dict[str, float],
+    anomalies: list[FeatureAnomaly],
+    context: dict[str, Any] | None,
+) -> str:
+    """构建特征异常解读的 LLM 指令。要求模型输出 JSON。"""
+    feature_rows = [
+        {
+            "feature": k,
+            "value": round(float(v), 4) if isinstance(v, float) else v,
+            "status": next(
+                (f"{a.severity}_{a.direction}" for a in anomalies if a.feature == k),
+                "normal",
+            ),
+        }
+        for k, v in features.items()
+        if k in _THRESHOLDS
+    ]
+    anomaly_rows = [
+        {
+            "feature": a.feature,
+            "value": round(a.value, 4),
+            "direction": a.direction,
+            "severity": a.severity,
+            "reference": a.threshold_ref,
+        }
+        for a in anomalies
+    ]
+    payload: dict[str, Any] = {
+        "feature_table": feature_rows,
+        "detected_anomalies": anomaly_rows,
+    }
+    if context:
+        payload["research_context"] = context
+
+    system = (
+        "你是一位资深人因工程研究员，擅长通过眼动指标推断用户认知状态。\n"
+        "请根据以下眼动特征数据，严格以 JSON 格式回复，不要输出任何 JSON 之外的文字。\n"
+        "JSON 格式：\n"
+        '{"cognitive_state": "<一句话认知状态假说>", '
+        '"ux_recommendations": ["<建议1>", "<建议2>", ...]}'
+    )
+    user = (
+        "眼动特征数据如下：\n\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
+        "请推断用户当前的认知状态，并给出针对产品界面的可操作 UX 改进建议。"
+    )
+    return f"[SYSTEM]\n{system}\n\n[USER]\n{user}"
+
+
 def _call_llm(
     prompt: str,
     *,
@@ -859,6 +1132,42 @@ def _as_text(value: Any) -> str:
 
 def _normalize_language(language: str) -> str:
     return "en" if str(language).strip().lower() == "en" else "zh"
+
+
+def _format_anomaly_explanation(
+    explanation: FeatureAnomalyExplanation,
+    language: str,
+) -> str:
+    """将 FeatureAnomalyExplanation 格式化为 Markdown 文本段落。"""
+    lines: list[str] = []
+
+    if not explanation.anomalies:
+        return "各项眼动指标均处于正常参考范围，未检测到显著异常。" if language == "zh" else "All features are within normal reference ranges."
+
+    severity_label = {"warning": "⚠ 轻度异常", "critical": "🔴 严重异常"} if language == "zh" else {"warning": "⚠ Warning", "critical": "🔴 Critical"}
+    direction_label = {"high": "偏高", "low": "偏低"} if language == "zh" else {"high": "High", "low": "Low"}
+
+    lines.append("**检测到的异常特征：**" if language == "zh" else "**Detected Anomalies:**")
+    for a in explanation.anomalies:
+        s_label = severity_label.get(a.severity, a.severity)
+        d_label = direction_label.get(a.direction, a.direction)
+        lines.append(f"- `{a.feature}` = {a.value:.3f}  [{s_label} · {d_label}]  {a.threshold_ref}")
+
+    lines.append("")
+    hyp_title = "**认知状态假说：**" if language == "zh" else "**Cognitive State Hypothesis:**"
+    lines.append(f"{hyp_title}  {explanation.cognitive_state_hypothesis}")
+
+    if explanation.ux_recommendations:
+        lines.append("")
+        rec_title = "**UX 改进建议：**" if language == "zh" else "**UX Recommendations:**"
+        lines.append(rec_title)
+        for rec in explanation.ux_recommendations:
+            lines.append(f"- {rec}")
+
+    mode_note = f"\n\n*解读来源：{explanation.explanation_mode}" + (f"（{explanation.model_used}）" if explanation.model_used else "") + "*"
+    lines.append(mode_note)
+
+    return "\n".join(lines)
 
 
 def _llm_failure_message(language: str) -> str:

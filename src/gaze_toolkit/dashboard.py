@@ -59,7 +59,12 @@ from gaze_toolkit.events import has_labeled_events
 from gaze_toolkit.io import from_frame
 from gaze_toolkit.pipeline import build_feature_dataset
 from gaze_toolkit.quality import QualityReport, assess_quality, find_missing_segments, format_quality_cards
-from gaze_toolkit.report_generator import generate_insight_report
+from gaze_toolkit.report_generator import (
+    FeatureAnomaly,
+    FeatureAnomalyExplanation,
+    explain_feature_anomalies,
+    generate_insight_report,
+)
 from gaze_toolkit.saliency import (
     COGNITIVE_SALIENCY_BACKEND,
     FAST_SALIENCY_BACKEND,
@@ -82,6 +87,22 @@ from gaze_toolkit.statistics import (
     mann_whitney_test,
     paired_t_test,
     wilcoxon_test,
+)
+from gaze_toolkit.dashboard_charts import (
+    VisualControls,
+    _build_aoi_scanpath_figure,
+    _build_aoi_transition_figure,
+    _build_batch_quality_figure,
+    _build_effect_size_forest,
+    _build_regression_prediction_figure,
+    _build_statistics_boxplot,
+    _effect_ci_scale,
+    _estimate_effect_ci,
+    _extract_metric_groups,
+    _format_p_for_display,
+    _localize_feature_name,
+    _overlay_aoi_shapes,
+    _significance_stars,
 )
 from gaze_toolkit.tables import fixation_table
 from gaze_toolkit.types import GazeRecording
@@ -243,16 +264,6 @@ class SegmentView:
     marker_value: str = ""
     start_marker: str = ""
     end_marker: str = ""
-
-
-@dataclass
-class VisualControls:
-    """Visual customization options for linked charts."""
-
-    scanpath_palette: str
-    heatmap_palette: str
-    fixation_opacity: float
-    heatmap_opacity: float
 
 
 def main() -> None:
@@ -576,11 +587,21 @@ def _build_visual_controls() -> VisualControls:
     fixation_opacity = float(st.sidebar.slider("注视层透明度", min_value=0.20, max_value=0.95, value=0.72, step=0.05))
     heatmap_opacity = float(st.sidebar.slider("热图透明度", min_value=0.20, max_value=0.95, value=0.60, step=0.05))
     st.sidebar.caption("注视节点和热图默认半透明，叠加刺激图时不会完全遮住背景。")
+
+    st.sidebar.markdown("**三层注意力可视化**")
+    st.sidebar.caption("上传刺激图片后生效。可单独显示任意层，也可叠加全部三层。")
+    show_saliency = st.sidebar.checkbox("物理显著性（OpenCV）", value=True, key="layer_show_saliency")
+    show_deepgaze = st.sidebar.checkbox("DeepGaze 预测注视", value=True, key="layer_show_deepgaze")
+    show_heatmap = st.sidebar.checkbox("真实眼动热力图", value=True, key="layer_show_heatmap")
+
     return VisualControls(
         scanpath_palette=SCANPATH_PALETTE_OPTIONS[scanpath_palette_label],
         heatmap_palette=HEATMAP_PALETTE_OPTIONS[heatmap_palette_label],
         fixation_opacity=fixation_opacity,
         heatmap_opacity=heatmap_opacity,
+        show_saliency=show_saliency,
+        show_deepgaze=show_deepgaze,
+        show_heatmap=show_heatmap,
     )
 
 
@@ -691,23 +712,33 @@ def _render_capability_story(
     controls: DashboardControls,
     segment_table: pd.DataFrame,
 ) -> None:
+    # ── 平台叙事：信号 → 认知状态 → 建议 ────────────────────────────────────
+    st.markdown(
+        """
+        <div style="display:flex;gap:0;margin-bottom:1.2rem">
+          <div style="flex:1;padding:1rem 1.2rem;background:var(--card-bg,#1e2130);border-radius:8px 0 0 8px;border-right:2px solid var(--accent,#4f8ef7)">
+            <div style="font-size:.75rem;font-weight:700;color:var(--accent,#4f8ef7);text-transform:uppercase;letter-spacing:.08em">Step 1 · 信号采集</div>
+            <div style="font-size:1rem;font-weight:600;margin:.4rem 0 .3rem">眼动 + 生理多模态</div>
+            <div style="font-size:.82rem;opacity:.8">原始采样点 → 预处理 → I-VT 事件检测 → 特征提取（注视 / 扫视 / 瞳孔 / 眨眼）</div>
+          </div>
+          <div style="flex:1;padding:1rem 1.2rem;background:var(--card-bg,#1e2130);border-right:2px solid var(--accent,#4f8ef7)">
+            <div style="font-size:.75rem;font-weight:700;color:var(--accent,#4f8ef7);text-transform:uppercase;letter-spacing:.08em">Step 2 · 认知状态</div>
+            <div style="font-size:1rem;font-weight:600;margin:.4rem 0 .3rem">AI 驱动的状态推断</div>
+            <div style="font-size:.82rem;opacity:.8">物理显著性基线 + DeepGaze 注视预测 + LLM 特征异常解读 → 认知负荷 / 意图估计</div>
+          </div>
+          <div style="flex:1;padding:1rem 1.2rem;background:var(--card-bg,#1e2130);border-radius:0 8px 8px 0">
+            <div style="font-size:.75rem;font-weight:700;color:var(--accent,#4f8ef7);text-transform:uppercase;letter-spacing:.08em">Step 3 · 洞察建议</div>
+            <div style="font-size:1rem;font-weight:600;margin:.4rem 0 .3rem">可解释 UX 建议</div>
+            <div style="font-size:.82rem;opacity:.8">特征异常告警 + 认知状态假说 + 具体界面改进建议，输出到报告或 Dashboard</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     left, right = st.columns([1.1, 1.3], gap="large")
 
     with left:
-        st.subheader("这一页关注什么")
-        st.write(
-            "这里更关注研究链路是否完整、观察层级是否清晰，以及不同分析视图能否在同一份记录上联动切换。"
-        )
-        st.markdown(
-            """
-            - 原始采样点可以先整理成统一结构，再进入事件识别、分段观察和特征摘要。
-            - 事件识别既可复用设备原始标签，也可按阈值重新计算，便于不同数据源保持一致。
-            - 缺失样本、眨眼片段和坏段可以按插值、清洗或保留原样的方式分别处理。
-            - 记录可以围绕时间窗或 Marker 分段，并把当前分段同步投影到 scanpath、heatmap 和事件表。
-            - 眼动链路可以继续接入心率等时间序列，为后续状态分析或多模态实验预留接口。
-            """
-        )
-
         st.subheader("当前会话摘要")
         metrics = analysis.quality_summary
         metric_cols = st.columns(4)
@@ -720,20 +751,33 @@ def _render_capability_story(
         if not segment_table.empty:
             st.caption(f"当前配置共得到 {len(segment_table)} 个分段。")
 
+        st.subheader("三层注意力可视化")
+        st.markdown(
+            """
+            上传产品界面截图后，可在左侧切换三层叠加显示：
+
+            | 层 | 来源 | 意义 |
+            |---|---|---|
+            | **物理显著性** | OpenCV（底层视觉对比） | 用户应该看哪里（物理预期） |
+            | **DeepGaze 预测** | DeepGazeIIE 认知模型 | 人类注视先验预测（认知期望） |
+            | **真实眼动热力图** | 上传的 CSV 眼动数据 | 用户实际看了哪里（真实观测） |
+
+            三层偏差 = 界面设计优化的直接证据。
+            """,
+        )
+
     with right:
-        st.subheader("当前分析范围")
+        st.subheader("平台功能模块")
         coverage_frame = pd.DataFrame(
             [
-                ["数据整理", "可用", "支持采样点标准化、字段映射和基础校验"],
-                ["缺失与坏段处理", "可用", "支持插值、清洗删除和保留原样"],
-                ["事件来源", "可用", "可复用设备标签，也可按阈值重算"],
-                ["分段方式", "可用", "支持整段、时间窗、Marker 窗口和 Marker 对"],
-                ["视图联动", "可用", "分段切换会同步更新 scanpath、heatmap 和事件表"],
-                ["特征摘要", "可用", "覆盖注视、扫视、眨眼、瞳孔和复杂度指标"],
-                ["建模实验", "可用", "提供基线分类实验和特征重要性查看"],
-                ["多模态接口", "可用", "可与心率等时间序列按时间轴对齐"],
+                ["基线层", "物理显著性 + DeepGaze", "产品截图 → 注意力基线地图，无需眼动数据"],
+                ["采集层", "眼动 + 心率多模态", "CSV / EyeLink 接入，支持采样率 30–1000 Hz"],
+                ["特征层", "注视 / 扫视 / 瞳孔 / 眨眼", "覆盖 40+ 维特征，AOI 兴趣区联动"],
+                ["AI 层", "认知负荷 + 意图预测", "RF / GBDT / SVM + LLM 特征异常解读"],
+                ["洞察层", "报告生成 + UX 建议", "认知状态假说 + 可操作界面改进项"],
+                ["批量层", "多文件批量分析", "跨会话对比 + 统计检验 + 效应量估计"],
             ],
-            columns=["模块", "当前支持", "说明"],
+            columns=["分析链层", "模块", "说明"],
         )
         _render_panel_table(coverage_frame, hide_index=True, max_height_px=360)
 
@@ -894,20 +938,23 @@ def _render_single_session(
 
     with right:
         st.markdown("### 核密度注意力热力图 (Heatmap)")
-        st.caption("依据当前展示分段中的注视密度，投射出屏幕上的视觉“重心区”和“信息盲区”。")
-        st.plotly_chart(
-            plot_interactive_heatmap(
-                display_analysis.enriched_recording,
-                background_image=stimulus_image,
-                screen_size=screen_size,
-                theme_name=theme_name,
-                palette=visual_controls.heatmap_palette,
-                heatmap_opacity=visual_controls.heatmap_opacity,
-            ),
-            key="single-session-heatmap",
-            width="stretch",
-            config={"displaylogo": False},
-        )
+        st.caption('依据当前展示分段中的注视密度，投射出屏幕上的视觉"重心区"和"信息盲区"。')
+        if visual_controls.show_heatmap:
+            st.plotly_chart(
+                plot_interactive_heatmap(
+                    display_analysis.enriched_recording,
+                    background_image=stimulus_image,
+                    screen_size=screen_size,
+                    theme_name=theme_name,
+                    palette=visual_controls.heatmap_palette,
+                    heatmap_opacity=visual_controls.heatmap_opacity,
+                ),
+                key="single-session-heatmap",
+                width="stretch",
+                config={"displaylogo": False},
+            )
+        else:
+            st.info("真实眼动热力图已隐藏，在左侧「三层注意力可视化」勾选可开启。")
 
     display_metrics = display_analysis.features
     st.markdown("**当前可视化对象**")
@@ -983,14 +1030,96 @@ def _render_single_session(
     top_features["特征"] = top_features["特征"].map(_localize_feature_name)
     _render_panel_table(top_features, hide_index=True, max_height_px=420)
 
+    _render_anomaly_explanation_panel(display_analysis.features, theme_name=theme_name)
+
     st.markdown("**分段结果预览**")
     if controls.segmentation_warning:
         st.warning(controls.segmentation_warning)
     elif segment_table.empty:
         st.info("当前配置下没有生成可用分段。")
     else:
-        st.caption("切换上方“当前展示分段”后，scanpath、heatmap、信号总览和事件表都会同步刷新。")
+        st.caption('切换上方"当前展示分段"后，scanpath、heatmap、信号总览和事件表都会同步刷新。')
         _render_panel_table(_format_segment_table(segment_table), hide_index=True, max_height_px=300)
+
+
+def _render_anomaly_explanation_panel(
+    features: dict[str, float],
+    theme_name: str = "dark",
+) -> None:
+    """特征异常解读面板：规则引擎常驻，可选开启 LLM 深度解读。"""
+    with st.expander("认知状态异常解读", expanded=False):
+        st.caption("基于眼动特征阈值自动检测异常，可选接入 LLM 获取认知状态假说与 UX 建议。")
+
+        use_llm = st.toggle("启用 LLM 深度解读", value=False, key="anomaly-use-llm")
+        api_key: str | None = None
+        llm_model = "gpt-4o-mini"
+        if use_llm:
+            llm_cols = st.columns([1, 2])
+            llm_model = llm_cols[0].selectbox(
+                "模型",
+                options=["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"],
+                key="anomaly-llm-model",
+            )
+            api_key = llm_cols[1].text_input(
+                "API Key",
+                type="password",
+                placeholder="留空则从环境变量读取",
+                key="anomaly-api-key",
+            ).strip() or None
+
+        if st.button("运行异常解读", key="anomaly-run", use_container_width=True):
+            with st.spinner("分析中..."):
+                try:
+                    result = explain_feature_anomalies(
+                        features,
+                        use_llm=use_llm,
+                        llm_model=llm_model,
+                        api_key=api_key,
+                    )
+                    st.session_state["_anomaly_result"] = result
+                except Exception as exc:
+                    st.error(f"解读失败：{exc}")
+                    st.session_state.pop("_anomaly_result", None)
+
+        result: FeatureAnomalyExplanation | None = st.session_state.get("_anomaly_result")
+        if result is None:
+            return
+
+        if not result.anomalies:
+            st.success("各项眼动指标均处于正常参考范围，未检测到显著异常。")
+            return
+
+        severity_color = {"critical": "#d15a5a", "warning": "#f0a63a"}
+        rows = []
+        for a in result.anomalies:
+            color = severity_color.get(a.severity, "#aaa")
+            rows.append({
+                "特征": a.feature,
+                "实测值": round(a.value, 3),
+                "方向": "↑ 偏高" if a.direction == "high" else "↓ 偏低",
+                "严重度": a.severity,
+                "参考": a.threshold_ref,
+            })
+        anomaly_df = pd.DataFrame(rows)
+
+        def _color_severity(val: str) -> str:
+            return f"color: {severity_color.get(val, '#aaa')}"
+
+        st.dataframe(
+            anomaly_df.style.map(_color_severity, subset=["严重度"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown(f"**认知状态假说：** {result.cognitive_state_hypothesis}")
+
+        if result.ux_recommendations:
+            st.markdown("**UX 改进建议：**")
+            for rec in result.ux_recommendations:
+                st.markdown(f"- {rec}")
+
+        mode_text = f"解读来源：`{result.explanation_mode}`" + (f"（{result.model_used}）" if result.model_used else "")
+        st.caption(mode_text)
 
 
 def _render_pupil_load_section(analysis: RecordingAnalysis, theme_name: str = "dark") -> None:
@@ -1085,11 +1214,28 @@ def _render_stimulus_attention_section(
     st.markdown("**基于图片内容的先验注意分布**")
     st.caption("这部分不依赖上传的眼动轨迹，只根据图片自身的颜色对比、局部反差和边缘结构，快速估计底层视觉显著性。")
 
+    saliency_size_mode = st.selectbox(
+        "显著图尺寸模式",
+        options=[
+            "跟随上传图片原始尺寸（推荐）",
+            "跟随屏幕分辨率",
+        ],
+        index=0,
+        help="原图模式会按上传图片宽高渲染，避免显著图背景被拉伸；屏幕模式保留与眼动坐标一致的映射。",
+    )
+
     try:
         result = predict_image_attention(stimulus_image, backend=FAST_SALIENCY_BACKEND)
     except (ImportError, TypeError, ValueError) as exc:
         st.warning(f"图片显著性生成失败：{exc}")
         return
+
+    if saliency_size_mode == "跟随上传图片原始尺寸（推荐）":
+        saliency_screen_size = (int(result.width), int(result.height))
+        preserve_aspect_ratio = True
+    else:
+        saliency_screen_size = screen_size
+        preserve_aspect_ratio = False
 
     fast_status = get_saliency_backend_status(FAST_SALIENCY_BACKEND)
     future_status = get_saliency_backend_status(COGNITIVE_SALIENCY_BACKEND)
@@ -1115,26 +1261,32 @@ def _render_stimulus_attention_section(
 
     left, right = st.columns(2, gap="large")
     with left:
-        st.markdown("### 图片快速显著性热力图")
-        st.caption("适合在没有真实眼动数据时，先用作刺激图的快速注意先验。")
-        st.plotly_chart(
-            plot_image_saliency_heatmap(
-                result.saliency_map,
-                background_image=stimulus_image,
-                screen_size=screen_size,
-                theme_name=theme_name,
-                palette=visual_controls.heatmap_palette,
-                heatmap_opacity=visual_controls.heatmap_opacity,
-            ),
-            key="stimulus-fast-saliency",
-            width="stretch",
-            config={"displaylogo": False},
-        )
+        st.markdown("### 物理显著性热力图（底层视觉）")
+        st.caption("基于颜色对比、局部反差和边缘结构，快速估计底层视觉吸引力（bottom-up saliency）。")
+        if visual_controls.show_saliency:
+            st.plotly_chart(
+                plot_image_saliency_heatmap(
+                    result.saliency_map,
+                    background_image=stimulus_image,
+                    screen_size=saliency_screen_size,
+                    theme_name=theme_name,
+                    palette=visual_controls.heatmap_palette,
+                    heatmap_opacity=visual_controls.heatmap_opacity,
+                    preserve_aspect_ratio=preserve_aspect_ratio,
+                ),
+                key="stimulus-fast-saliency",
+                width="stretch",
+                config={"displaylogo": False},
+            )
+        else:
+            st.info("物理显著性层已隐藏，在左侧「三层注意力可视化」勾选可开启。")
 
     with right:
-        st.markdown("### 认知模型热力图 (DeepGazeIIE)")
-        st.caption("固定使用 DeepGazeIIE，根据当前图片内容预测人类注视先验，不读取上传的眼动轨迹。")
-        if runtime_ok:
+        st.markdown("### 认知模型预测注视 (DeepGazeIIE)")
+        st.caption("DeepGazeIIE 根据图片内容预测人类注视先验（top-down cognitive prediction），不读取上传的眼动轨迹。")
+        if not visual_controls.show_deepgaze:
+            st.info("DeepGaze 层已隐藏，在左侧「三层注意力可视化」勾选可开启。")
+        elif runtime_ok:
             try:
                 cognitive = predict_image_attention(
                     stimulus_image,
@@ -1148,10 +1300,11 @@ def _render_stimulus_attention_section(
                     plot_image_saliency_heatmap(
                         cognitive.saliency_map,
                         background_image=stimulus_image,
-                        screen_size=screen_size,
+                        screen_size=saliency_screen_size,
                         theme_name=theme_name,
                         palette=visual_controls.heatmap_palette,
                         heatmap_opacity=visual_controls.heatmap_opacity,
+                        preserve_aspect_ratio=preserve_aspect_ratio,
                         title="认知模型注意热力图 (DeepGaze)",
                     ),
                     key="stimulus-cognitive-saliency",
@@ -1183,6 +1336,7 @@ def _render_stimulus_attention_section(
                     ]
                 )
             )
+
 
 def _render_aoi_section(
     *,
@@ -1526,79 +1680,6 @@ def _describe_aoi_region(aoi: AOI) -> str:
     return " -> ".join(f"({x:.0f}, {y:.0f})" for x, y in aoi.region)
 
 
-def _build_aoi_scanpath_figure(
-    *,
-    recording: GazeRecording,
-    aois: list[AOI],
-    stimulus_image: str | Path | Any | None,
-    screen_size: tuple[int, int],
-    theme_name: str,
-    visual_controls: VisualControls,
-) -> go.Figure:
-    figure = plot_interactive_scanpath(
-        recording,
-        background_image=stimulus_image,
-        screen_size=screen_size,
-        theme_name=theme_name,
-        palette=visual_controls.scanpath_palette,
-        fixation_opacity=visual_controls.fixation_opacity,
-    )
-    figure.update_xaxes(range=[0.0, float(screen_size[0])])
-    figure.update_yaxes(range=[float(screen_size[1]), 0.0])
-    figure.update_layout(title="AOI 叠加 Scanpath")
-    _overlay_aoi_shapes(figure, aois)
-    return figure
-
-
-def _overlay_aoi_shapes(figure: go.Figure, aois: list[AOI]) -> None:
-    palette = [
-        ("rgba(0, 243, 255, 0.14)", "rgba(0, 243, 255, 0.88)"),
-        ("rgba(0, 255, 157, 0.14)", "rgba(0, 255, 157, 0.88)"),
-        ("rgba(255, 181, 90, 0.16)", "rgba(255, 181, 90, 0.88)"),
-        ("rgba(125, 158, 255, 0.16)", "rgba(125, 158, 255, 0.88)"),
-    ]
-
-    for index, aoi in enumerate(aois):
-        fill_color, line_color = palette[index % len(palette)]
-        if aoi.region_type == "rectangle":
-            x_min, y_min, x_max, y_max = aoi.region
-            figure.add_shape(
-                type="rect",
-                x0=x_min,
-                y0=y_min,
-                x1=x_max,
-                y1=y_max,
-                line={"color": line_color, "width": 2},
-                fillcolor=fill_color,
-                layer="above",
-            )
-            label_x = float(x_min) + 8.0
-            label_y = float(y_min) + 12.0
-        else:
-            vertices = [(float(x), float(y)) for x, y in aoi.region]
-            path = "M " + " L ".join(f"{x},{y}" for x, y in vertices) + " Z"
-            figure.add_shape(
-                type="path",
-                path=path,
-                line={"color": line_color, "width": 2},
-                fillcolor=fill_color,
-                layer="above",
-            )
-            label_x = float(np.mean([x for x, _ in vertices]))
-            label_y = float(np.mean([y for _, y in vertices]))
-
-        figure.add_annotation(
-            x=label_x,
-            y=label_y,
-            text=aoi.name,
-            showarrow=False,
-            bgcolor="rgba(8, 23, 45, 0.82)",
-            bordercolor=line_color,
-            borderpad=5,
-            font={"color": "#EAF7FF", "size": 11},
-        )
-
-
 def _aoi_metrics_frame(metrics: dict[str, Any]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for metric in metrics.values():
@@ -1617,35 +1698,6 @@ def _aoi_metrics_frame(metrics: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _build_aoi_transition_figure(matrix: pd.DataFrame, *, theme_name: str) -> go.Figure:
-    template = "plotly_white" if theme_name == "light" else "plotly_dark"
-    text_values = matrix.map(lambda value: f"{value:.2f}")
-    figure = go.Figure(
-        data=
-        [
-            go.Heatmap(
-                z=matrix.to_numpy(dtype=float),
-                x=matrix.columns.tolist(),
-                y=matrix.index.tolist(),
-                zmin=0.0,
-                zmax=1.0,
-                colorscale="Blues",
-                text=text_values.to_numpy(),
-                texttemplate="%{text}",
-                hovertemplate="来源=%{y}<br>目标=%{x}<br>概率=%{z:.2f}<extra></extra>",
-                colorbar={"title": "转移概率"},
-            )
-        ]
-    )
-    figure.update_layout(
-        title="AOI 转移矩阵热力图",
-        template=template,
-        height=380,
-        margin={"l": 32, "r": 20, "t": 48, "b": 28},
-        xaxis={"title": "目标 AOI"},
-        yaxis={"title": "来源 AOI"},
-    )
-    return figure
 def _render_segment_selector(segment_views: list[SegmentView]) -> SegmentView | None:
     if not segment_views:
         return None
@@ -1957,61 +2009,6 @@ def _render_intent_baseline_section(theme_name: str = "dark") -> None:
     _render_statistics_section(feature_df=feature_df, theme_name=theme_name)
 
 
-def _build_regression_prediction_figure(
-    holdout: pd.DataFrame,
-    *,
-    theme_name: str = "dark",
-) -> go.Figure:
-    theme = "plotly_white" if theme_name == "light" else "plotly_dark"
-    frame = holdout.copy()
-    frame["y_true"] = pd.to_numeric(frame["y_true"], errors="coerce")
-    frame["y_pred"] = pd.to_numeric(frame["y_pred"], errors="coerce")
-    frame["residual"] = pd.to_numeric(frame.get("residual"), errors="coerce")
-    frame = frame.dropna(subset=["y_true", "y_pred"])
-    figure = go.Figure()
-    if frame.empty:
-        figure.update_layout(
-            title="回归预测对照",
-            template=theme,
-            height=360,
-            margin={"l": 24, "r": 16, "t": 48, "b": 36},
-        )
-        return figure
-
-    min_value = float(min(frame["y_true"].min(), frame["y_pred"].min()))
-    max_value = float(max(frame["y_true"].max(), frame["y_pred"].max()))
-    figure.add_trace(
-        go.Scatter(
-            x=frame["y_true"],
-            y=frame["y_pred"],
-            mode="markers",
-            marker={"size": 10, "color": "#00bfe8", "line": {"width": 1, "color": "rgba(255,255,255,0.22)"}},
-            customdata=frame[["residual"]] if "residual" in frame.columns else None,
-            hovertemplate="真实值=%{x:.3f}<br>预测值=%{y:.3f}<br>残差=%{customdata[0]:.3f}<extra></extra>",
-            name="Holdout 样本",
-        )
-    )
-    figure.add_trace(
-        go.Scatter(
-            x=[min_value, max_value],
-            y=[min_value, max_value],
-            mode="lines",
-            line={"dash": "dash", "color": "rgba(255,255,255,0.45)"},
-            name="理想预测线",
-            hoverinfo="skip",
-        )
-    )
-    figure.update_layout(
-        title="回归预测对照",
-        template=theme,
-        height=360,
-        margin={"l": 24, "r": 16, "t": 48, "b": 36},
-        xaxis={"title": "真实值"},
-        yaxis={"title": "预测值"},
-    )
-    return figure
-
-
 def _render_public_dataset_benchmark_section(theme_name: str = "dark") -> None:
     with st.expander("pymovements 公共数据集事件检测对照", expanded=False):
         st.caption("使用 pymovements 公共 toy dataset，对比当前项目事件识别与 pymovements I-VT / I-DT 的 fixation 检测结果。")
@@ -2309,40 +2306,6 @@ def _validate_dashboard_granularity(feature_df: pd.DataFrame, *, condition_col: 
             raise ValueError("输入必须是 subject × condition 粒度的汇总表")
 
 
-def _extract_metric_groups(
-    *,
-    feature_df: pd.DataFrame,
-    metric: str,
-    selected_conditions: list[str],
-    paired: bool,
-    subject_col: str | None,
-) -> tuple[np.ndarray, np.ndarray]:
-    subset_columns = ["condition", metric]
-    if subject_col is not None:
-        subset_columns.append(subject_col)
-    subset = feature_df[subset_columns].copy()
-    subset[metric] = pd.to_numeric(subset[metric], errors="coerce")
-    subset = subset.dropna(subset=["condition", metric])
-
-    if paired:
-        if subject_col is None:
-            raise ValueError("配对检验需要 subject_id 列。")
-        pivot = subset.pivot(index=subject_col, columns="condition", values=metric)
-        pivot = pivot.reindex(columns=selected_conditions).dropna()
-        if len(pivot) < 2:
-            raise ValueError("当前数据不足以形成有效的配对样本。")
-        return (
-            pivot[selected_conditions[0]].to_numpy(dtype=float),
-            pivot[selected_conditions[1]].to_numpy(dtype=float),
-        )
-
-    left = subset.loc[subset["condition"] == selected_conditions[0], metric].dropna().to_numpy(dtype=float)
-    right = subset.loc[subset["condition"] == selected_conditions[1], metric].dropna().to_numpy(dtype=float)
-    if len(left) < 2 or len(right) < 2:
-        raise ValueError("每个 condition 至少需要 2 个有效观测。")
-    return left, right
-
-
 def _format_descriptive_table(frame: pd.DataFrame) -> pd.DataFrame:
     display = frame.copy()
     if display.empty:
@@ -2386,173 +2349,6 @@ def _format_statistics_results(frame: pd.DataFrame) -> pd.DataFrame:
     return display[
         ["指标", "检验", "统计量", "p 值", "显著性", "效应量", "效应量类型", "CI 下界", "CI 上界", "结论"]
     ]
-
-
-def _build_statistics_boxplot(
-    *,
-    feature_df: pd.DataFrame,
-    selected_conditions: list[str],
-    selected_metrics: list[str],
-    theme_name: str,
-) -> go.Figure:
-    figure = go.Figure()
-    for condition in selected_conditions:
-        condition_frame = feature_df.loc[feature_df["condition"] == condition]
-        for metric in selected_metrics:
-            values = pd.to_numeric(condition_frame[metric], errors="coerce").dropna()
-            figure.add_trace(
-                go.Box(
-                    x=[_localize_feature_name(metric)] * len(values),
-                    y=values,
-                    name=str(condition),
-                    boxmean=True,
-                    legendgroup=str(condition),
-                    offsetgroup=str(condition),
-                )
-            )
-
-    figure.update_layout(
-        title="条件间箱线图对比",
-        template="plotly_white" if theme_name == "light" else "plotly_dark",
-        height=420,
-        margin={"l": 24, "r": 16, "t": 48, "b": 36},
-        xaxis={"title": "指标"},
-        yaxis={"title": "数值"},
-        boxmode="group",
-    )
-    return figure
-
-
-def _build_effect_size_forest(
-    *,
-    feature_df: pd.DataFrame,
-    results: pd.DataFrame,
-    selected_conditions: list[str],
-    paired: bool,
-    subject_col: str | None,
-    theme_name: str,
-) -> go.Figure:
-    plot_frame = results.copy()
-    if plot_frame.empty:
-        return go.Figure()
-
-    ci_bounds = [
-        _estimate_effect_ci(
-            feature_df=feature_df,
-            metric=row.metric,
-            effect_size=float(row.effect_size),
-            ci_lower=float(row.ci_lower),
-            ci_upper=float(row.ci_upper),
-            selected_conditions=selected_conditions,
-            paired=paired,
-            subject_col=subject_col,
-        )
-        for row in plot_frame.itertuples(index=False)
-    ]
-    plot_frame["effect_ci_lower"] = [bounds[0] for bounds in ci_bounds]
-    plot_frame["effect_ci_upper"] = [bounds[1] for bounds in ci_bounds]
-    plot_frame["metric_label"] = plot_frame["metric"].map(_localize_feature_name)
-
-    error_minus = np.where(
-        np.isfinite(plot_frame["effect_ci_lower"]),
-        plot_frame["effect_size"] - plot_frame["effect_ci_lower"],
-        0.0,
-    )
-    error_plus = np.where(
-        np.isfinite(plot_frame["effect_ci_upper"]),
-        plot_frame["effect_ci_upper"] - plot_frame["effect_size"],
-        0.0,
-    )
-
-    figure = go.Figure(
-        data=[
-            go.Scatter(
-                x=plot_frame["effect_size"],
-                y=plot_frame["metric_label"],
-                mode="markers",
-                marker={"size": 11, "color": "#00bfe8"},
-                error_x={
-                    "type": "data",
-                    "symmetric": False,
-                    "array": error_plus,
-                    "arrayminus": error_minus,
-                    "visible": True,
-                },
-                customdata=plot_frame[["effect_size_name", "conclusion"]],
-                hovertemplate="指标=%{y}<br>效应量=%{x:.2f}<br>类型=%{customdata[0]}<br>%{customdata[1]}<extra></extra>",
-            )
-        ]
-    )
-    figure.add_vline(x=0.0, line_dash="dash", line_color="rgba(255,255,255,0.35)")
-    figure.update_layout(
-        title="效应量森林图",
-        template="plotly_white" if theme_name == "light" else "plotly_dark",
-        height=420,
-        margin={"l": 24, "r": 16, "t": 48, "b": 36},
-        xaxis={"title": "效应量"},
-        yaxis={"title": "指标"},
-    )
-    return figure
-
-
-def _estimate_effect_ci(
-    *,
-    feature_df: pd.DataFrame,
-    metric: str,
-    effect_size: float,
-    ci_lower: float,
-    ci_upper: float,
-    selected_conditions: list[str],
-    paired: bool,
-    subject_col: str | None,
-) -> tuple[float, float]:
-    if not np.isfinite(ci_lower) or not np.isfinite(ci_upper):
-        return (float("nan"), float("nan"))
-
-    group1, group2 = _extract_metric_groups(
-        feature_df=feature_df,
-        metric=metric,
-        selected_conditions=selected_conditions,
-        paired=paired,
-        subject_col=subject_col,
-    )
-    if paired:
-        differences = group2 - group1
-        scale = float(np.std(differences, ddof=1))
-    else:
-        scale = _effect_ci_scale(group1, group2)
-
-    if not np.isfinite(scale) or scale == 0.0:
-        return (float(effect_size), float(effect_size))
-    return (float(ci_lower / scale), float(ci_upper / scale))
-
-
-def _effect_ci_scale(group1: np.ndarray, group2: np.ndarray) -> float:
-    n1 = len(group1)
-    n2 = len(group2)
-    if n1 < 2 or n2 < 2:
-        return float("nan")
-    var1 = float(np.var(group1, ddof=1))
-    var2 = float(np.var(group2, ddof=1))
-    pooled_var = (((n1 - 1) * var1) + ((n2 - 1) * var2)) / max(n1 + n2 - 2, 1)
-    return float(np.sqrt(max(pooled_var, 0.0)))
-
-
-def _significance_stars(p_value: float) -> str:
-    if p_value < 0.001:
-        return "***"
-    if p_value < 0.01:
-        return "**"
-    if p_value < 0.05:
-        return "*"
-    return ""
-
-
-def _format_p_for_display(p_value: float) -> str:
-    if p_value < 0.001:
-        return "< .001"
-    text = f"{p_value:.3f}"
-    return text[1:] if text.startswith("0") else text
 
 
 def _render_multimodal_tab(recording: GazeRecording, theme_name: str = "dark") -> None:
@@ -2668,7 +2464,7 @@ def _render_batch_tab(theme_name: str = "dark") -> None:
 
     batch_df = st.session_state.get(BATCH_RESULTS_KEY)
     if not isinstance(batch_df, pd.DataFrame) or batch_df.empty:
-        st.info("上传多个文件并点击“开始批量分析”后，这里会显示批量结果、CSV 下载和报告导出。")
+        st.info('上传多个文件并点击"开始批量分析"后，这里会显示批量结果、CSV 下载和报告导出。')
         return
 
     st.markdown("---")
@@ -2967,28 +2763,6 @@ def _quality_counts_frame(batch_df: pd.DataFrame) -> pd.DataFrame:
     return distribution.loc[distribution["count"] > 0].reset_index(drop=True)
 
 
-def _build_batch_quality_figure(quality_counts: pd.DataFrame, *, theme_name: str) -> go.Figure:
-    figure = go.Figure(
-        data=[
-            go.Bar(
-                x=quality_counts["quality_grade"],
-                y=quality_counts["count"],
-                marker={"color": ["#0fb8ad", "#5fbf68", "#f0a63a", "#d15a5a", "#8a9cb4"][: len(quality_counts)]},
-                hovertemplate="质量等级=%{x}<br>记录数=%{y}<extra></extra>",
-            )
-        ]
-    )
-    figure.update_layout(
-        title="质量分布",
-        template="plotly_white" if theme_name == "light" else "plotly_dark",
-        height=320,
-        margin={"l": 20, "r": 12, "t": 46, "b": 24},
-        xaxis={"title": "质量等级"},
-        yaxis={"title": "记录数"},
-    )
-    return figure
-
-
 def _build_batch_summary_table(batch_df: pd.DataFrame) -> pd.DataFrame:
     success_df = _successful_batch_rows(batch_df)
     rows: list[dict[str, object]] = []
@@ -3054,7 +2828,7 @@ def _render_portfolio_talking_points() -> None:
         这套原型既可以读取真实眼动时序，也可以生成可重复的合成会话数据，适合先验证链路，再逐步替换成真实实验数据。
 
         **数据链路**
-        数据先进入缺失值处理，再做平滑与标准化；随后按“原始标签”或“自定义阈值”识别事件，
+        数据先进入缺失值处理，再做平滑与标准化；随后按"原始标签"或"自定义阈值"识别事件，
         并支持围绕 Marker 或时间段做分段提取与视图联动。
 
         **观察层级**
@@ -3067,7 +2841,7 @@ def _render_portfolio_talking_points() -> None:
         **方法验证**
         除了分析链路本身，当前项目还接入了 `pymovements` 公共数据集对照实验，并能从
         `ToyDatasetEyeLink` 的原始 `.asc` 中解析 `EFIX` 事件作为近似 ground truth。
-        这意味着项目不仅能“做分析”，还能“验证事件检测方法是否可信”，更贴近真实研究工作。
+        这意味着项目不仅能"做分析"，还能"验证事件检测方法是否可信"，更贴近真实研究工作。
 
         **使用前提**
         默认假设上传文件能映射到 `timestamp/x/y`，并且 gaze 坐标与当前屏幕分辨率处于同一像素坐标系。
@@ -3229,7 +3003,7 @@ def _parse_time_ranges(raw: str) -> list[tuple[float, float]]:
     for chunk in [item.strip() for item in re.split(r"[;\n]+", raw) if item.strip()]:
         match = TIME_RANGE_PATTERN.match(chunk)
         if match is None:
-            raise ValueError(f"无法解析时间段：{chunk}。请使用“开始-结束”的格式。")
+            raise ValueError(f'无法解析时间段：{chunk}。请使用"开始-结束"的格式。')
         start_ms = float(match.group(1))
         end_ms = float(match.group(2))
         if end_ms < start_ms:
@@ -3304,80 +3078,6 @@ def _label_for_value(mapping: dict[str, str], value: str) -> str:
         if mapped == value:
             return label
     return value
-
-
-def _localize_feature_name(name: str) -> str:
-    direct_map = {
-        "duration_ms": "总时长(ms)",
-        "sample_count": "样本数",
-        "valid_ratio": "有效比例",
-        "path_length": "路径长度",
-        "velocity_mean": "速度均值",
-        "velocity_peak": "速度峰值",
-        "fixation_count": "注视次数",
-        "fixation_duration_mean": "注视平均时长",
-        "fixation_duration_total": "注视总时长",
-        "fixation_density": "注视密度",
-        "saccade_count": "扫视次数",
-        "saccade_amplitude_mean": "扫视幅度均值",
-        "saccade_peak_velocity_mean": "扫视峰值速度均值",
-        "saccade_latency_mean": "扫视潜伏期均值",
-        "blink_count": "眨眼次数",
-        "blink_rate_hz": "眨眼频率",
-        "blink_duration_mean": "眨眼平均时长",
-        "pupil_baseline": "瞳孔基线水平",
-        "pupil_change_rate": "瞳孔变化率",
-        "pupil_bc_mean": "基线校正后瞳孔均值",
-        "pupil_bc_std": "基线校正后瞳孔标准差",
-        "pupil_bc_peak": "基线校正后瞳孔峰值",
-        "pupil_bc_q75": "基线校正后瞳孔 75 分位",
-        "pupil_tonic_level": "瞳孔持续性水平",
-        "pupil_phasic_mean": "瞳孔相位性反应均值",
-        "pupil_phasic_peak": "瞳孔相位性反应峰值",
-        "pupil_dilation_latency_ms": "瞳孔扩张潜伏期（ms）",
-        "pupil_blink_ratio": "眨眼样本占比",
-        "pupil_interpolation_ratio": "插值样本占比",
-        "cognitive_load_level": "工作负荷等级",
-        "cognitive_load_score": "工作负荷评分",
-        "heart_rate_mean": "心率均值",
-        "heart_rate_std": "心率标准差",
-        "heart_rate_min": "最低心率",
-        "heart_rate_max": "最高心率",
-        "heart_rate_rmssd": "心率RMSSD",
-    }
-    if name in direct_map:
-        return direct_map[name]
-
-    replacements = {
-        "fixation": "注视",
-        "saccade": "扫视",
-        "blink": "眨眼",
-        "pupil": "瞳孔",
-        "velocity": "速度",
-        "duration": "时长",
-        "count": "次数",
-        "mean": "均值",
-        "peak": "峰值",
-        "baseline": "基线",
-        "density": "密度",
-        "latency": "潜伏期",
-        "rolling": "滑窗",
-        "std": "标准差",
-        "min": "最小值",
-        "max": "最大值",
-        "skew": "偏度",
-        "kurtosis": "峰度",
-        "approx": "近似",
-        "entropy": "熵",
-        "q25": "25分位",
-        "q75": "75分位",
-        "x": "X",
-        "y": "Y",
-    }
-    localized = name
-    for source, target in replacements.items():
-        localized = localized.replace(source, target)
-    return localized.replace("_", "·")
 
 
 def _inject_styles(theme_name: str = "dark") -> None:
